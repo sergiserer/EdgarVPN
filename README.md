@@ -27,7 +27,7 @@ ForgeVPN is **peer-to-peer**: every node runs identical code, and there is no de
 Each peer:
 
 1. Owns a Linux **TUN interface** with its own virtual (overlay) IP address, through which the kernel delivers raw IP packets destined for the VPN.
-2. Will exchange those packets with other peers over a **UDP socket** (in progress).
+2. Exchanges those packets with a peer over a **UDP socket**, bridged via a `poll()` event loop.
 3. Will authenticate and encrypt that traffic using an **X25519 key exchange** and **ChaCha20-Poly1305** (planned).
 
 The entire development and demo environment runs in Docker — every peer is its own container, and Docker networks simulate independent machines on the internet. No host networking configuration is ever required.
@@ -64,13 +64,14 @@ docker compose --profile test up --build --abort-on-container-exit
 What actually runs today, peer by peer:
 
 * Each peer opens `/dev/net/tun`, creates a TUN interface, assigns it a virtual IP, and brings it up — all via direct `ioctl` calls (`TUNSETIFF`, `SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS`), not shell commands.
-* The peer then captures real IP packets the kernel routes to that interface and logs them.
-* Not yet implemented: sending those packets to another peer (UDP transport), encryption, routing, and a configuration file format — see the roadmap below.
+* A `poll()`-based event loop bridges that TUN device to a UDP socket: packets are forwarded to a configured peer and written back from incoming datagrams. In the `demo` profile, this is enough for a real `ping` between two peers' overlay addresses to round-trip end to end.
+* Traffic is unauthenticated and unencrypted at this stage — anything arriving on a peer's UDP port is trusted. That's the next layer to add.
+* Not yet implemented: peer authentication, encryption, N-way routing between more than two peers, and a configuration file format — see the roadmap below.
 
 ## Documentation
 
 * [`docs/DOCKER.md`](docs/DOCKER.md) — Docker image and Compose network design: multi-stage builds, capabilities required for TUN, the profile system.
-* [`docs/NETWORKING.md`](docs/NETWORKING.md) — the TUN module design and the underlay/overlay addressing scheme.
+* [`docs/NETWORKING.md`](docs/NETWORKING.md) — the underlay/overlay addressing scheme, the TUN module, and the UDP transport bridge.
 
 ---
 
@@ -78,7 +79,7 @@ What actually runs today, peer by peer:
 
 * [x] Docker infrastructure & build pipeline (multi-stage image, Compose profiles, CI-ready test target)
 * [x] TUN interface module (create, configure, capture)
-* [ ] UDP transport between peers
+* [x] UDP transport between peers (`poll()`-based bridge, real ping round-trip in the demo profile)
 * [ ] Configuration file format (peer identity, endpoints, keys)
 * [ ] X25519 key exchange
 * [ ] ChaCha20-Poly1305 authenticated encryption, replay protection

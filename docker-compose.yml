@@ -34,6 +34,7 @@ services:
     environment:
       PEER_NAME: peer1
       TUN_ADDRESS: 10.8.0.11
+      PEER_ENDPOINT: peer2:51820
     networks:
       forgevpn-net:
         ipv4_address: 10.10.0.11
@@ -46,6 +47,7 @@ services:
     environment:
       PEER_NAME: peer2
       TUN_ADDRESS: 10.8.0.12
+      PEER_ENDPOINT: peer1:51820
     networks:
       forgevpn-net:
         ipv4_address: 10.10.0.12
@@ -58,6 +60,7 @@ services:
     environment:
       PEER_NAME: peer3
       TUN_ADDRESS: 10.8.0.13
+      PEER_ENDPOINT: peer4:51820
     networks:
       forgevpn-net:
         ipv4_address: 10.10.0.13
@@ -70,11 +73,15 @@ services:
     environment:
       PEER_NAME: peer4
       TUN_ADDRESS: 10.8.0.14
+      PEER_ENDPOINT: peer3:51820
     networks:
       forgevpn-net:
         ipv4_address: 10.10.0.14
     profiles: ["multi-peer"]
 
+  # peer5 has no PEER_ENDPOINT on purpose: N-way routing isn't implemented
+  # yet (see docs/NETWORKING.md), so it runs in capture-only mode --
+  # proof the topology still builds and starts with an odd peer out.
   peer5:
     <<: *peer-base
     container_name: forgevpn-peer5

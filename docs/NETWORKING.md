@@ -1,8 +1,8 @@
 # Networking
 
-This document covers ForgeVPN's addressing scheme and the TUN interface
-module. It will grow to cover UDP transport, routing, and packet framing
-as those milestones land.
+This document covers ForgeVPN's addressing scheme, the TUN interface
+module, and the UDP transport module. It will grow to cover routing and
+packet framing as those milestones land.
 
 ## Two address spaces
 
@@ -67,12 +67,68 @@ directly instead of glibc's `<net/if.h>`, which is the standard idiom for
 this kind of code and avoids `struct ifreq` / `IFNAMSIZ` definitions
 clashing between the two header sets.
 
-### Current behavior
+## UDP transport module (`include/udp.h`, `src/udp.c`)
 
-`forgevpn` currently opens and configures its TUN interface on startup and
-loops reading packets from it, logging each packet's size. It does not yet
-do anything with the packets — no encryption, no forwarding. That is
-intentional: this milestone's scope is proving the interface works
-end-to-end before the transport and crypto layers exist. The next
-milestone (UDP transport) is what will actually move these bytes to
-another peer.
+A thin wrapper over BSD sockets: bind a UDP socket, resolve a `host:port`
+(including Docker Compose service names via the embedded DNS server) into
+a `sockaddr_in`, and send/receive datagrams. Kept just as small as the TUN
+module and deliberately protocol-agnostic — it doesn't know it's carrying
+VPN traffic, which is what will let the cryptography milestones wrap
+payloads before they reach `udp_send` without touching this module.
+
+## Bridging TUN and UDP (`src/main.c`)
+
+`forgevpn` now runs a `poll()` loop over two file descriptors at once: the
+TUN device and the UDP socket.
+
+* **TUN readable** → a packet arrived from the kernel (e.g. an application
+  sent traffic to another peer's overlay address). If a peer endpoint is
+  configured, the packet is forwarded via `udp_send` unmodified; otherwise
+  it is only logged (see "Capture-only peers" below).
+* **UDP readable** → a datagram arrived from the network. Its payload is
+  written straight into the TUN device with `tun_write`; the kernel then
+  routes it locally, exactly as if it had arrived on a physical interface.
+
+`poll()` was chosen over `select()` because it has no fixed descriptor-set
+size limit and a cleaner API — relevant once a later milestone needs to
+watch several peer sockets at once for real multi-peer routing.
+
+There is intentionally **no authentication or encryption** at this stage:
+any datagram that reaches a peer's UDP port is written to its TUN device
+as-is. This is safe only because the transport runs on an isolated Docker
+network with no external exposure. Making this safe for a real network is
+exactly what the X25519 key exchange and ChaCha20-Poly1305 milestones
+exist to do.
+
+### Capture-only peers
+
+A peer with no `PEER_ENDPOINT` environment variable still binds its UDP
+socket (so another peer could reach it) but does not forward TUN traffic
+anywhere — it just logs captured packet sizes, as in the previous
+milestone. This lets the `multi-peer` Compose profile keep working with an
+odd number of peers before real N-way routing exists: `peer1`↔`peer2` and
+`peer3`↔`peer4` are paired and forward traffic to each other; `peer5` runs
+capture-only.
+
+### Demonstrated behavior
+
+With the `demo` profile (`peer1` ↔ `peer2`, `PEER_ENDPOINT` set on both),
+a full round trip works: `ping 10.8.0.12` from inside `peer1` sends an
+ICMP echo through `peer1`'s TUN, across UDP to `peer2`, into `peer2`'s TUN
+— at which point the kernel on `peer2` treats it as normal inbound traffic
+to its own address and generates an ICMP echo reply, which routes back out
+through `peer2`'s TUN, back across UDP, and into `peer1`'s TUN, where the
+original `ping` process receives it. No part of that path is VPN-specific
+code recognizing ICMP; it works because both kernels see ordinary IP
+traffic on a point-to-point interface.
+
+### Known limitations
+
+* No packet authentication: a container on the same Docker network could
+  spoof traffic to a peer's UDP port. Addressed by the cryptography
+  milestones.
+* No handling of MTU/fragmentation overhead once packets carry
+  encryption/framing overhead — revisit when the crypto milestones add
+  bytes to each datagram.
+* `PEER_ENDPOINT` is a single fixed remote peer, not a routing table —
+  real multi-peer forwarding is future work (see the roadmap).

@@ -13,6 +13,7 @@ endif()
 # tests that need to exercise them directly (e.g. tun_test).
 add_library(forgevpn_core STATIC
     src/tun.c
+    src/udp.c
 )
 target_include_directories(forgevpn_core PUBLIC include)
 
@@ -24,6 +25,10 @@ enable_testing()
 add_executable(tun_test tests/tun_test.c)
 target_link_libraries(tun_test PRIVATE forgevpn_core)
 add_test(NAME tun_test COMMAND tun_test)
+
+add_executable(udp_test tests/udp_test.c)
+target_link_libraries(udp_test PRIVATE forgevpn_core)
+add_test(NAME udp_test COMMAND udp_test)
 
 add_test(
     NAME smoke_test
