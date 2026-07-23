@@ -82,23 +82,26 @@ payloads before they reach `udp_send` without touching this module.
 TUN device and the UDP socket.
 
 * **TUN readable** → a packet arrived from the kernel (e.g. an application
-  sent traffic to another peer's overlay address). If a peer endpoint is
-  configured, the packet is forwarded via `udp_send` unmodified; otherwise
-  it is only logged (see "Capture-only peers" below).
-* **UDP readable** → a datagram arrived from the network. Its payload is
-  written straight into the TUN device with `tun_write`; the kernel then
-  routes it locally, exactly as if it had arrived on a physical interface.
+  sent traffic to another peer's overlay address). If a peer is
+  configured, the packet is sealed with ChaCha20-Poly1305 (see
+  `docs/CRYPTOGRAPHY.md`) and forwarded via `udp_send`; otherwise it is
+  only logged (see "Capture-only peers" below).
+* **UDP readable** → a datagram arrived from the network. If a peer is
+  configured, it's decrypted and authenticated, checked for replay, and
+  only then written into the TUN device with `tun_write` -- anything that
+  fails either check is dropped, not written. The kernel then routes
+  accepted traffic locally, exactly as if it had arrived on a physical
+  interface.
 
 `poll()` was chosen over `select()` because it has no fixed descriptor-set
 size limit and a cleaner API — relevant once a later milestone needs to
 watch several peer sockets at once for real multi-peer routing.
 
-There is intentionally **no authentication or encryption** at this stage:
-any datagram that reaches a peer's UDP port is written to its TUN device
-as-is. This is safe only because the transport runs on an isolated Docker
-network with no external exposure. Making this safe for a real network is
-exactly what the X25519 key exchange and ChaCha20-Poly1305 milestones
-exist to do.
+As of the cryptography milestones, tunnel traffic between two configured
+peers is encrypted and authenticated end to end — see
+`docs/CRYPTOGRAPHY.md` for the packet format, the key exchange, and what
+security properties are (and are not) provided yet (there is no forward
+secrecy or key rotation so far).
 
 ### Capture-only peers
 
@@ -113,8 +116,8 @@ capture-only. See `docs/CONFIGURATION.md` for the file format.
 ### Demonstrated behavior
 
 With the `demo` profile (`peer1` ↔ `peer2`, both configured with a
-`[Peer]` section pointing at each other), a full round trip works:
-`ping 10.8.0.12` from inside `peer1` sends an
+`[Peer]` section and matching key pairs), a full round trip works over
+an encrypted tunnel: `ping 10.8.0.12` from inside `peer1` sends an
 ICMP echo through `peer1`'s TUN, across UDP to `peer2`, into `peer2`'s TUN
 — at which point the kernel on `peer2` treats it as normal inbound traffic
 to its own address and generates an ICMP echo reply, which routes back out
@@ -125,11 +128,12 @@ traffic on a point-to-point interface.
 
 ### Known limitations
 
-* No packet authentication: a container on the same Docker network could
-  spoof traffic to a peer's UDP port. Addressed by the cryptography
-  milestones.
-* No handling of MTU/fragmentation overhead once packets carry
-  encryption/framing overhead — revisit when the crypto milestones add
-  bytes to each datagram.
+* No forward secrecy or key rotation yet, and replay protection is a
+  simple strict-monotonic counter check rather than a sliding window —
+  see `docs/CRYPTOGRAPHY.md` for the full list.
+* No handling of MTU/fragmentation: encryption adds `CRYPTO_PACKET_OVERHEAD`
+  (24 bytes) to every packet, which isn't accounted for against the TUN
+  interface's MTU. Not yet a practical problem at the packet sizes this
+  demo generates (ICMP), but worth revisiting before larger payloads.
 * The `[Peer]` section holds a single fixed remote peer, not a routing
   table — real multi-peer forwarding is future work (see the roadmap).

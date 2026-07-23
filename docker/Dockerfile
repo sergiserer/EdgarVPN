@@ -10,6 +10,8 @@ FROM debian:bookworm-slim AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
+        pkg-config \
+        libsodium-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -17,6 +19,7 @@ COPY CMakeLists.txt ./
 COPY src ./src
 COPY include ./include
 COPY tests ./tests
+COPY tools ./tools
 
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build --parallel
@@ -35,17 +38,22 @@ CMD ["ctest", "--test-dir", "build", "--output-on-failure"]
 # Stage: runtime
 # Minimal image that actually runs as a VPN peer. Includes iproute2 for
 # inspecting/managing the TUN interface and routing table inside the
-# container, which is needed from the networking milestones onward.
+# container, and libsodium23 -- the shared library forgevpn and
+# forgevpn-keygen are dynamically linked against for X25519 key exchange
+# (see docs/CRYPTOGRAPHY.md).
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \
         iputils-ping \
+        libsodium23 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/forgevpn /usr/local/bin/forgevpn
+COPY --from=builder /src/build/forgevpn-keygen /usr/local/bin/forgevpn-keygen
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["forgevpn"]

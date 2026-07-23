@@ -120,6 +120,8 @@ int config_load(const char *path, forgevpn_config_t *cfg)
 
     section_t section = SECTION_NONE;
     int have_address = 0;
+    int have_public_key = 0;
+    int have_role = 0;
     char line[CONFIG_MAX_LINE];
     int lineno = 0;
 
@@ -207,6 +209,15 @@ int config_load(const char *path, forgevpn_config_t *cfg)
                     return -1;
                 }
                 cfg->listen_port = (unsigned short)port;
+            } else if (strcasecmp(key, "PrivateKey") == 0) {
+                if (crypto_decode_base64(value, cfg->private_key.bytes,
+                                          sizeof(cfg->private_key.bytes)) != 0) {
+                    fprintf(stderr, "config: %s:%d: invalid PrivateKey (not valid base64 "
+                                     "or wrong length)\n", path, lineno);
+                    fclose(f);
+                    return -1;
+                }
+                cfg->has_private_key = 1;
             } else {
                 fprintf(stderr, "config: %s:%d: unknown key '%s' in [Interface]\n",
                         path, lineno, key);
@@ -223,6 +234,28 @@ int config_load(const char *path, forgevpn_config_t *cfg)
                     fclose(f);
                     return -1;
                 }
+            } else if (strcasecmp(key, "PublicKey") == 0) {
+                if (crypto_decode_base64(value, cfg->peer_public_key.bytes,
+                                          sizeof(cfg->peer_public_key.bytes)) != 0) {
+                    fprintf(stderr, "config: %s:%d: invalid PublicKey (not valid base64 "
+                                     "or wrong length)\n", path, lineno);
+                    fclose(f);
+                    return -1;
+                }
+                have_public_key = 1;
+            } else if (strcasecmp(key, "Role") == 0) {
+                if (strcasecmp(value, "initiator") == 0) {
+                    cfg->role = CRYPTO_ROLE_INITIATOR;
+                } else if (strcasecmp(value, "responder") == 0) {
+                    cfg->role = CRYPTO_ROLE_RESPONDER;
+                } else {
+                    fprintf(stderr,
+                            "config: %s:%d: invalid Role '%s' (expected initiator or responder)\n",
+                            path, lineno, value);
+                    fclose(f);
+                    return -1;
+                }
+                have_role = 1;
             } else {
                 fprintf(stderr, "config: %s:%d: unknown key '%s' in [Peer]\n",
                         path, lineno, key);
@@ -244,6 +277,20 @@ int config_load(const char *path, forgevpn_config_t *cfg)
     }
     if (cfg->has_peer && cfg->peer_host[0] == '\0') {
         fprintf(stderr, "config: %s: [Peer] section is missing Endpoint\n", path);
+        return -1;
+    }
+    if (cfg->has_peer && !cfg->has_private_key) {
+        fprintf(stderr,
+                "config: %s: [Interface] is missing PrivateKey, required when [Peer] is present\n",
+                path);
+        return -1;
+    }
+    if (cfg->has_peer && !have_public_key) {
+        fprintf(stderr, "config: %s: [Peer] section is missing PublicKey\n", path);
+        return -1;
+    }
+    if (cfg->has_peer && !have_role) {
+        fprintf(stderr, "config: %s: [Peer] section is missing Role\n", path);
         return -1;
     }
     if (cfg->tun_name[0] == '\0') {
