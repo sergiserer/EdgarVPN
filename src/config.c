@@ -76,6 +76,37 @@ static int parse_cidr(const char *cidr, char *addr_out, size_t addr_len,
     return 0;
 }
 
+/* Parses "a.b.c.d/prefix" into a raw address and prefix length -- used
+ * for AllowedIPs, where routing.c wants values it can mask and compare
+ * directly rather than dotted strings. */
+static int parse_ip_prefix(const char *text, struct in_addr *addr_out, unsigned int *prefix_out)
+{
+    char buf[CONFIG_MAX_LINE];
+    if (strlen(text) >= sizeof(buf)) {
+        return -1;
+    }
+    strcpy(buf, text);
+
+    char *slash = strchr(buf, '/');
+    if (slash == NULL) {
+        return -1;
+    }
+    *slash = '\0';
+    const char *prefix_str = slash + 1;
+
+    char *end = NULL;
+    long prefix = strtol(prefix_str, &end, 10);
+    if (end == prefix_str || *end != '\0' || prefix < 0 || prefix > 32) {
+        return -1;
+    }
+
+    if (inet_pton(AF_INET, buf, addr_out) != 1) {
+        return -1;
+    }
+    *prefix_out = (unsigned int)prefix;
+    return 0;
+}
+
 /* Parses "host:port". */
 static int parse_endpoint_value(const char *value, char *host_out, size_t host_len,
                                  unsigned short *port_out)
@@ -120,8 +151,13 @@ int config_load(const char *path, forgevpn_config_t *cfg)
 
     section_t section = SECTION_NONE;
     int have_address = 0;
-    int have_public_key = 0;
+
+    config_peer_t *cur = NULL;
+    int have_endpoint = 0;
+    int have_pubkey = 0;
     int have_role = 0;
+    int have_allowed = 0;
+
     char line[CONFIG_MAX_LINE];
     int lineno = 0;
 
@@ -143,18 +179,31 @@ int config_load(const char *path, forgevpn_config_t *cfg)
             *close = '\0';
             const char *section_name = trimmed + 1;
 
+            /* A [Peer] section must be complete before another one starts. */
+            if (section == SECTION_PEER &&
+                (!have_endpoint || !have_pubkey || !have_role || !have_allowed)) {
+                fprintf(stderr, "config: %s:%d: previous [Peer] section is incomplete "
+                                 "(needs Endpoint, PublicKey, Role, AllowedIPs)\n", path, lineno);
+                fclose(f);
+                return -1;
+            }
+
             if (strcasecmp(section_name, "Interface") == 0) {
                 section = SECTION_INTERFACE;
             } else if (strcasecmp(section_name, "Peer") == 0) {
-                if (cfg->has_peer) {
-                    fprintf(stderr,
-                            "config: %s:%d: only one [Peer] section is supported currently\n",
-                            path, lineno);
+                if (cfg->peer_count >= CONFIG_MAX_PEERS) {
+                    fprintf(stderr, "config: %s:%d: too many [Peer] sections (max %d)\n",
+                            path, lineno, CONFIG_MAX_PEERS);
                     fclose(f);
                     return -1;
                 }
                 section = SECTION_PEER;
-                cfg->has_peer = 1;
+                cur = &cfg->peers[cfg->peer_count++];
+                memset(cur, 0, sizeof(*cur));
+                have_endpoint = 0;
+                have_pubkey = 0;
+                have_role = 0;
+                have_allowed = 0;
             } else {
                 fprintf(stderr, "config: %s:%d: unknown section '%s'\n",
                         path, lineno, section_name);
@@ -226,28 +275,28 @@ int config_load(const char *path, forgevpn_config_t *cfg)
             }
         } else if (section == SECTION_PEER) {
             if (strcasecmp(key, "Endpoint") == 0) {
-                if (parse_endpoint_value(value, cfg->peer_host, sizeof(cfg->peer_host),
-                                          &cfg->peer_port) != 0) {
+                if (parse_endpoint_value(value, cur->host, sizeof(cur->host), &cur->port) != 0) {
                     fprintf(stderr,
                             "config: %s:%d: invalid Endpoint '%s' (expected host:port)\n",
                             path, lineno, value);
                     fclose(f);
                     return -1;
                 }
+                have_endpoint = 1;
             } else if (strcasecmp(key, "PublicKey") == 0) {
-                if (crypto_decode_base64(value, cfg->peer_public_key.bytes,
-                                          sizeof(cfg->peer_public_key.bytes)) != 0) {
+                if (crypto_decode_base64(value, cur->public_key.bytes,
+                                          sizeof(cur->public_key.bytes)) != 0) {
                     fprintf(stderr, "config: %s:%d: invalid PublicKey (not valid base64 "
                                      "or wrong length)\n", path, lineno);
                     fclose(f);
                     return -1;
                 }
-                have_public_key = 1;
+                have_pubkey = 1;
             } else if (strcasecmp(key, "Role") == 0) {
                 if (strcasecmp(value, "initiator") == 0) {
-                    cfg->role = CRYPTO_ROLE_INITIATOR;
+                    cur->role = CRYPTO_ROLE_INITIATOR;
                 } else if (strcasecmp(value, "responder") == 0) {
-                    cfg->role = CRYPTO_ROLE_RESPONDER;
+                    cur->role = CRYPTO_ROLE_RESPONDER;
                 } else {
                     fprintf(stderr,
                             "config: %s:%d: invalid Role '%s' (expected initiator or responder)\n",
@@ -256,6 +305,14 @@ int config_load(const char *path, forgevpn_config_t *cfg)
                     return -1;
                 }
                 have_role = 1;
+            } else if (strcasecmp(key, "AllowedIPs") == 0) {
+                if (parse_ip_prefix(value, &cur->allowed_address, &cur->allowed_prefix) != 0) {
+                    fprintf(stderr, "config: %s:%d: invalid AllowedIPs '%s' "
+                                     "(expected a.b.c.d/prefix)\n", path, lineno, value);
+                    fclose(f);
+                    return -1;
+                }
+                have_allowed = 1;
             } else {
                 fprintf(stderr, "config: %s:%d: unknown key '%s' in [Peer]\n",
                         path, lineno, key);
@@ -271,26 +328,19 @@ int config_load(const char *path, forgevpn_config_t *cfg)
 
     fclose(f);
 
+    if (section == SECTION_PEER &&
+        (!have_endpoint || !have_pubkey || !have_role || !have_allowed)) {
+        fprintf(stderr, "config: %s: final [Peer] section is incomplete "
+                         "(needs Endpoint, PublicKey, Role, AllowedIPs)\n", path);
+        return -1;
+    }
     if (!have_address) {
         fprintf(stderr, "config: %s: missing required Address in [Interface]\n", path);
         return -1;
     }
-    if (cfg->has_peer && cfg->peer_host[0] == '\0') {
-        fprintf(stderr, "config: %s: [Peer] section is missing Endpoint\n", path);
-        return -1;
-    }
-    if (cfg->has_peer && !cfg->has_private_key) {
-        fprintf(stderr,
-                "config: %s: [Interface] is missing PrivateKey, required when [Peer] is present\n",
-                path);
-        return -1;
-    }
-    if (cfg->has_peer && !have_public_key) {
-        fprintf(stderr, "config: %s: [Peer] section is missing PublicKey\n", path);
-        return -1;
-    }
-    if (cfg->has_peer && !have_role) {
-        fprintf(stderr, "config: %s: [Peer] section is missing Role\n", path);
+    if (cfg->peer_count > 0 && !cfg->has_private_key) {
+        fprintf(stderr, "config: %s: [Interface] is missing PrivateKey, required when at "
+                         "least one [Peer] section is present\n", path);
         return -1;
     }
     if (cfg->tun_name[0] == '\0') {

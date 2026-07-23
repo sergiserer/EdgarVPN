@@ -1,31 +1,31 @@
 /*
  * Entry point for the ForgeVPN peer daemon.
  *
- * When a peer has a configured [Peer] (see docs/CONFIGURATION.md), it
- * runs a live handshake (src/session.c) with that peer before any data
- * flows: an initiator sends a HANDSHAKE_INIT and a responder replies
- * with a HANDSHAKE_RESPONSE, each carrying a fresh ephemeral public key.
- * Once both sides have derived matching forward-secret data keys from
- * that exchange, the session is established and the TUN device is
- * bridged to the UDP socket -- every outbound packet sealed, every
- * inbound datagram authenticated and replay-checked before being written
- * to the TUN device.
+ * A peer can now have any number of [Peer] sections (see
+ * docs/CONFIGURATION.md), each with its own live handshake (src/session.c),
+ * forward-secret session, and AllowedIPs range. Outbound TUN traffic is
+ * routed to whichever configured peer's AllowedIPs covers its
+ * destination address (src/routing.c); inbound UDP datagrams are matched
+ * back to a peer by source address, since every peer shares the same UDP
+ * socket. A peer with no [Peer] sections still runs capture-only, as
+ * before.
  *
- * This milestone adds session lifecycle management on top of that: an
- * idle established session sends periodic keepalives (empty DATA
- * messages) so the peer can tell it's still alive, and an initiator that
- * hasn't heard from its peer in too long assumes the session is dead
- * (the peer crashed, restarted, or network connectivity dropped) and
- * re-runs the handshake with a fresh ephemeral key pair. A responder
- * needs no equivalent timeout logic: it simply accepts a fresh
- * HANDSHAKE_INIT whenever one arrives, established or not (see
- * docs/CRYPTOGRAPHY.md for why that's safe). A peer with no [Peer]
- * section still runs capture-only, as before -- there is no session to
- * encrypt with, so none of this applies to it.
+ * Only an *initiator* relationship needs to resolve its peer's endpoint
+ * up front, since it has to know where to send the first HANDSHAKE_INIT.
+ * A *responder* relationship needs no DNS resolution at all: its session
+ * is initialized from the configured static keys alone, and its peer's
+ * address is *learned* from the source of the first HANDSHAKE_INIT that
+ * successfully authenticates against those keys (the same idea
+ * WireGuard calls endpoint roaming). This matters once a peer's config
+ * lists other peers that may not be running yet -- see the multi-peer
+ * Compose profile, where not every peer in the mesh is necessarily up at
+ * the same time, and see docs/NETWORKING.md for the DNS-race bug this
+ * design replaced.
  */
 
 #include "config.h"
 #include "crypto.h"
+#include "routing.h"
 #include "session.h"
 #include "tun.h"
 #include "udp.h"
@@ -44,22 +44,34 @@
 #define DEFAULT_CONFIG_PATH "/etc/forgevpn/forgevpn.conf"
 #define MAX_PACKET_SIZE 2048
 #define SEALED_BUF_SIZE (SESSION_DATA_OVERHEAD + MAX_PACKET_SIZE)
-#define ENDPOINT_RESOLVE_RETRIES 20
-#define ENDPOINT_RESOLVE_DELAY_US 500000
 
 /* How often the poll() loop wakes up even with no I/O, to check the
  * timers below. */
 #define POLL_TIMEOUT_MS 1000
-/* Send a keepalive (empty DATA message) if we haven't sent anything to
- * the peer in this long. Real WireGuard defaults to 25s; this is tuned
- * shorter so the behavior is easy to observe in a short demo run. */
+/* Send a keepalive (empty DATA message) to an established peer if we
+ * haven't sent it anything in this long. Real WireGuard defaults to
+ * 25s; this is tuned shorter so the behavior is easy to observe in a
+ * short demo run. */
 #define KEEPALIVE_INTERVAL_MS 5000
-/* Initiator only: assume the session is dead and re-handshake if we
- * haven't received anything valid from the peer in this long. */
+/* For a peer we're the initiator toward: assume the session is dead and
+ * re-handshake (which includes retrying DNS resolution) if we haven't
+ * received anything valid from it in this long. */
 #define SESSION_TIMEOUT_MS 15000
 
 static volatile sig_atomic_t g_running = 1;
 static const unsigned char EMPTY_PAYLOAD[1] = {0};
+
+/* Runtime state for one configured peer: its resolved/learned address
+ * (if any) and its handshake/data session, plus the liveness timestamps
+ * that drive keepalive and reconnection. */
+typedef struct {
+    const config_peer_t *config;
+    int addr_resolved;
+    struct sockaddr_in addr;
+    session_t session;
+    uint64_t last_rx_activity_ms;
+    uint64_t last_tx_activity_ms;
+} peer_session_t;
 
 static void handle_shutdown(int signum)
 {
@@ -74,36 +86,91 @@ static uint64_t monotonic_ms(void)
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
-/* Resolves host:port with retries, since Docker's embedded DNS may not
- * yet have an entry for a peer container that is still starting. */
-static int resolve_peer_with_retry(const char *peer_name, const char *host,
-                                    unsigned short port, struct sockaddr_in *addr_out)
+/*
+ * Initiator only. Resolves the peer's endpoint if not already resolved
+ * (a no-op, throttled retry if that fails -- not fatal), starts a fresh
+ * handshake attempt, and sends a HANDSHAKE_INIT. Used both at startup
+ * and to re-handshake after a timeout.
+ */
+static void initiate_handshake(peer_session_t *ps, const char *local_name, udp_socket_t *udp,
+                                unsigned char *buf, size_t buf_len, uint64_t now)
 {
-    for (int attempt = 1; attempt <= ENDPOINT_RESOLVE_RETRIES && g_running; attempt++) {
-        if (udp_resolve(addr_out, host, port) == 0) {
-            return 0;
+    if (!ps->addr_resolved) {
+        /* Set regardless of outcome, so a failed attempt is retried no
+         * sooner than SESSION_TIMEOUT_MS from now, not every tick. */
+        ps->last_rx_activity_ms = now;
+
+        if (udp_resolve(&ps->addr, ps->config->host, ps->config->port) != 0) {
+            fprintf(stderr, "[forgevpn] peer '%s': '%s' not resolvable yet, will keep "
+                             "retrying\n", local_name, ps->config->host);
+            return;
         }
-        fprintf(stderr, "[forgevpn] peer '%s': waiting for '%s' to resolve (attempt %d/%d)\n",
-                peer_name, host, attempt, ENDPOINT_RESOLVE_RETRIES);
-        usleep(ENDPOINT_RESOLVE_DELAY_US);
+        ps->addr_resolved = 1;
     }
-    return -1;
+
+    session_start_handshake(&ps->session);
+    ps->last_rx_activity_ms = now;
+    ps->last_tx_activity_ms = now;
+
+    ssize_t init_len = session_build_init(&ps->session, buf, buf_len);
+    if (init_len < 0 || udp_send(udp, buf, (size_t)init_len, &ps->addr) < 0) {
+        fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake init to '%s'\n",
+                local_name, ps->config->host);
+        return;
+    }
+    printf("[forgevpn] peer '%s' sent handshake init to '%s', awaiting response\n",
+           local_name, ps->config->host);
+    fflush(stdout);
 }
 
-/* Builds and sends a HANDSHAKE_INIT for a fresh (or freshly-restarted)
- * session. Used both at startup and to re-handshake after a timeout. */
-static int send_handshake_init(const char *peer_name, session_t *session, udp_socket_t *udp,
-                                const struct sockaddr_in *peer_addr,
-                                unsigned char *buf, size_t buf_len)
+/* Finds which peer a UDP datagram came from, by matching its source
+ * address against every peer whose address we already know -- every
+ * peer shares one UDP socket, so this is how inbound traffic normally
+ * gets attributed. Returns NULL for a responder relationship whose
+ * address hasn't been learned yet (see find_responder_for_init). */
+static peer_session_t *find_peer_by_addr(peer_session_t *peers, int count,
+                                          const struct sockaddr_in *from)
 {
-    ssize_t init_len = session_build_init(session, buf, buf_len);
-    if (init_len < 0 || udp_send(udp, buf, (size_t)init_len, peer_addr) < 0) {
-        fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake init\n", peer_name);
-        return -1;
+    for (int i = 0; i < count; i++) {
+        if (peers[i].addr_resolved &&
+            peers[i].addr.sin_addr.s_addr == from->sin_addr.s_addr &&
+            peers[i].addr.sin_port == from->sin_port) {
+            return &peers[i];
+        }
     }
-    printf("[forgevpn] peer '%s' sent handshake init, awaiting response\n", peer_name);
-    fflush(stdout);
-    return 0;
+    return NULL;
+}
+
+/*
+ * For a HANDSHAKE_INIT from a source address that find_peer_by_addr
+ * didn't recognize: tries every configured responder relationship's
+ * static keys until one successfully authenticates the message (a
+ * relationship we're the initiator toward would never receive an INIT,
+ * so those are skipped). session_handle_init's own auth check makes a
+ * wrong guess a harmless no-op -- see docs/CRYPTOGRAPHY.md.
+ *
+ * On success, writes the HANDSHAKE_RESPONSE to `out` and returns the
+ * matching peer; the caller is responsible for actually learning the
+ * address (ps->addr = *from) once it decides the response was sent
+ * successfully. Returns NULL if no configured responder relationship's
+ * key authenticates this message.
+ */
+static peer_session_t *find_responder_for_init(peer_session_t *peers, int count,
+                                                const unsigned char *in, size_t in_len,
+                                                unsigned char *out, size_t out_len,
+                                                ssize_t *response_len_out)
+{
+    for (int i = 0; i < count; i++) {
+        if (peers[i].config->role != CRYPTO_ROLE_RESPONDER) {
+            continue;
+        }
+        ssize_t response_len = session_handle_init(&peers[i].session, in, in_len, out, out_len);
+        if (response_len >= 0) {
+            *response_len_out = response_len;
+            return &peers[i];
+        }
+    }
+    return NULL;
 }
 
 int main(void)
@@ -150,55 +217,48 @@ int main(void)
         return 1;
     }
 
-    struct sockaddr_in peer_addr;
-    memset(&peer_addr, 0, sizeof(peer_addr));
-    session_t session;
-    memset(&session, 0, sizeof(session));
+    peer_session_t peers[CONFIG_MAX_PEERS];
+    memset(peers, 0, sizeof(peers));
     unsigned char cipher_buf[SEALED_BUF_SIZE];
-    uint64_t last_rx_activity_ms = monotonic_ms();
-    uint64_t last_tx_activity_ms = monotonic_ms();
+    crypto_public_key_t local_pk;
 
-    if (cfg.has_peer) {
-        if (resolve_peer_with_retry(cfg.name, cfg.peer_host, cfg.peer_port, &peer_addr) != 0) {
-            fprintf(stderr, "[forgevpn] peer '%s': could not resolve peer endpoint '%s:%u'\n",
-                    cfg.name, cfg.peer_host, cfg.peer_port);
-            udp_close(&udp);
-            tun_close(&tun);
-            return 1;
-        }
-
-        crypto_public_key_t local_pk;
+    if (cfg.peer_count > 0) {
         crypto_derive_public_key(&cfg.private_key, &local_pk);
-        if (session_init(&session, cfg.role, &local_pk, &cfg.private_key,
-                          &cfg.peer_public_key) != 0) {
-            fprintf(stderr, "[forgevpn] peer '%s': failed to initialize session "
-                             "(peer's PublicKey may be invalid)\n", cfg.name);
-            udp_close(&udp);
-            tun_close(&tun);
-            return 1;
-        }
 
-        char peer_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip));
-        printf("[forgevpn] peer '%s' up: interface '%s' (%s/%s), UDP :%u <-> peer %s:%u\n",
-               cfg.name, tun.name, cfg.tun_address, cfg.tun_netmask, cfg.listen_port,
-               peer_ip, ntohs(peer_addr.sin_port));
+        for (int i = 0; i < cfg.peer_count; i++) {
+            peers[i].config = &cfg.peers[i];
 
-        if (cfg.role == CRYPTO_ROLE_INITIATOR) {
-            if (send_handshake_init(cfg.name, &session, &udp, &peer_addr,
-                                     cipher_buf, sizeof(cipher_buf)) != 0) {
+            /* Static-key derivation needs no network access, so every
+             * relationship -- initiator or responder -- gets its session
+             * ready immediately. */
+            if (session_init(&peers[i].session, cfg.peers[i].role, &local_pk, &cfg.private_key,
+                              &cfg.peers[i].public_key) != 0) {
+                fprintf(stderr, "[forgevpn] peer '%s': failed to initialize session with "
+                                 "'%s' (its PublicKey may be invalid)\n",
+                        cfg.name, cfg.peers[i].host);
                 udp_close(&udp);
                 tun_close(&tun);
                 return 1;
             }
-            last_tx_activity_ms = monotonic_ms();
-        } else {
-            printf("[forgevpn] peer '%s' awaiting handshake init from peer\n", cfg.name);
+            peers[i].last_rx_activity_ms = monotonic_ms();
+
+            if (cfg.peers[i].role == CRYPTO_ROLE_INITIATOR) {
+                initiate_handshake(&peers[i], cfg.name, &udp, cipher_buf, sizeof(cipher_buf),
+                                    monotonic_ms());
+            } else {
+                printf("[forgevpn] peer '%s' awaiting handshake init from '%s'\n",
+                       cfg.name, cfg.peers[i].host);
+                fflush(stdout);
+            }
         }
-        last_rx_activity_ms = monotonic_ms();
+
+        printf("[forgevpn] peer '%s' up: interface '%s' (%s/%s), UDP :%u, %d peer(s) "
+               "configured\n",
+               cfg.name, tun.name, cfg.tun_address, cfg.tun_netmask, cfg.listen_port,
+               cfg.peer_count);
     } else {
         printf("[forgevpn] peer '%s' up: interface '%s' (%s/%s), UDP :%u, "
-               "no peer configured (capture-only)\n",
+               "no peers configured (capture-only)\n",
                cfg.name, tun.name, cfg.tun_address, cfg.tun_netmask, cfg.listen_port);
     }
     fflush(stdout);
@@ -228,27 +288,42 @@ int main(void)
                     fprintf(stderr, "[forgevpn] peer '%s': tun_read error: %s\n",
                             cfg.name, strerror(errno));
                 }
-            } else if (!cfg.has_peer) {
+            } else if (cfg.peer_count == 0) {
                 printf("[forgevpn] peer '%s' captured packet: %zd bytes\n", cfg.name, n);
                 fflush(stdout);
-            } else if (session.state != SESSION_STATE_ESTABLISHED) {
-                printf("[forgevpn] peer '%s' session not established yet, dropping "
-                       "%zd-byte outbound packet\n", cfg.name, n);
-                fflush(stdout);
             } else {
-                ssize_t sealed_len = session_seal_data(&session, plain_buf, (size_t)n,
-                                                         cipher_buf, sizeof(cipher_buf));
-                if (sealed_len < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': failed to encrypt a %zd-byte packet\n",
-                            cfg.name, n);
-                } else if (udp_send(&udp, cipher_buf, (size_t)sealed_len, &peer_addr) < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': udp_send error: %s\n",
-                            cfg.name, strerror(errno));
-                } else {
-                    last_tx_activity_ms = monotonic_ms();
-                    printf("[forgevpn] peer '%s' tun -> udp: %zd bytes (sealed to %zd)\n",
-                           cfg.name, n, sealed_len);
+                struct in_addr dest;
+                int idx = (routing_parse_ipv4_dest(plain_buf, (size_t)n, &dest) == 0)
+                              ? routing_find_peer_for_dest(&cfg, dest)
+                              : -1;
+                if (idx < 0) {
+                    printf("[forgevpn] peer '%s' no route for a %zd-byte outbound packet, "
+                           "dropping\n", cfg.name, n);
                     fflush(stdout);
+                } else if (peers[idx].session.state != SESSION_STATE_ESTABLISHED) {
+                    printf("[forgevpn] peer '%s' session with '%s' not established yet, "
+                           "dropping %zd-byte packet\n",
+                           cfg.name, peers[idx].config->host, n);
+                    fflush(stdout);
+                } else {
+                    ssize_t sealed_len = session_seal_data(&peers[idx].session, plain_buf,
+                                                             (size_t)n, cipher_buf,
+                                                             sizeof(cipher_buf));
+                    if (sealed_len < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': failed to encrypt a %zd-byte "
+                                         "packet for '%s'\n",
+                                cfg.name, n, peers[idx].config->host);
+                    } else if (udp_send(&udp, cipher_buf, (size_t)sealed_len,
+                                         &peers[idx].addr) < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': udp_send to '%s' error: %s\n",
+                                cfg.name, peers[idx].config->host, strerror(errno));
+                    } else {
+                        peers[idx].last_tx_activity_ms = monotonic_ms();
+                        printf("[forgevpn] peer '%s' tun -> udp (%s): %zd bytes "
+                               "(sealed to %zd)\n",
+                               cfg.name, peers[idx].config->host, n, sealed_len);
+                        fflush(stdout);
+                    }
                 }
             }
         }
@@ -261,95 +336,149 @@ int main(void)
                     fprintf(stderr, "[forgevpn] peer '%s': udp_recv error: %s\n",
                             cfg.name, strerror(errno));
                 }
-            } else if (!cfg.has_peer || n < 1) {
+            } else if (cfg.peer_count == 0 || n < 1) {
                 printf("[forgevpn] peer '%s' received %zd bytes on UDP with no session, "
                        "dropping\n", cfg.name, n);
                 fflush(stdout);
-            } else if (cipher_buf[0] == SESSION_MSG_HANDSHAKE_INIT &&
-                       cfg.role == CRYPTO_ROLE_RESPONDER) {
-                unsigned char response[SESSION_HANDSHAKE_MSG_LEN];
-                ssize_t response_len = session_handle_init(&session, cipher_buf, (size_t)n,
-                                                             response, sizeof(response));
-                if (response_len < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': rejected a malformed, "
-                                     "unauthenticated, or stale handshake init\n", cfg.name);
-                } else if (udp_send(&udp, response, (size_t)response_len, &peer_addr) < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake response: "
-                                     "%s\n", cfg.name, strerror(errno));
-                } else {
-                    last_rx_activity_ms = monotonic_ms();
-                    last_tx_activity_ms = last_rx_activity_ms;
-                    printf("[forgevpn] peer '%s' handshake complete, session established\n",
-                           cfg.name);
-                    fflush(stdout);
-                }
-            } else if (cipher_buf[0] == SESSION_MSG_HANDSHAKE_RESPONSE &&
-                       cfg.role == CRYPTO_ROLE_INITIATOR) {
-                if (session_handle_response(&session, cipher_buf, (size_t)n) < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': rejected a malformed, "
-                                     "unauthenticated, or stale handshake response\n", cfg.name);
-                } else {
-                    last_rx_activity_ms = monotonic_ms();
-                    printf("[forgevpn] peer '%s' handshake complete, session established\n",
-                           cfg.name);
-                    fflush(stdout);
-                }
-            } else if (cipher_buf[0] == SESSION_MSG_DATA) {
-                ssize_t opened_len = session_open_data(&session, cipher_buf, (size_t)n,
-                                                         plain_buf, sizeof(plain_buf));
-                if (opened_len < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': dropping a data packet (not "
-                                     "established, failed authentication, or replayed)\n",
-                            cfg.name);
-                } else if (opened_len == 0) {
-                    last_rx_activity_ms = monotonic_ms();
-                    printf("[forgevpn] peer '%s' received keepalive\n", cfg.name);
-                    fflush(stdout);
-                } else if (tun_write(&tun, plain_buf, (size_t)opened_len) < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': tun_write error: %s\n",
-                            cfg.name, strerror(errno));
-                } else {
-                    last_rx_activity_ms = monotonic_ms();
-                    printf("[forgevpn] peer '%s' udp -> tun: %zd bytes (opened from %zd)\n",
-                           cfg.name, opened_len, n);
-                    fflush(stdout);
-                }
             } else {
-                fprintf(stderr, "[forgevpn] peer '%s': dropping unexpected message "
-                                 "(type %u) for this peer's role/state\n",
-                        cfg.name, (unsigned)cipher_buf[0]);
+                peer_session_t *ps = find_peer_by_addr(peers, cfg.peer_count, &from);
+
+                if (ps == NULL && cipher_buf[0] == SESSION_MSG_HANDSHAKE_INIT) {
+                    unsigned char response[SESSION_HANDSHAKE_MSG_LEN];
+                    ssize_t response_len = 0;
+                    peer_session_t *matched = find_responder_for_init(
+                        peers, cfg.peer_count, cipher_buf, (size_t)n,
+                        response, sizeof(response), &response_len);
+
+                    if (matched == NULL) {
+                        char from_ip[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
+                        fprintf(stderr, "[forgevpn] peer '%s': handshake init from %s:%u "
+                                         "did not authenticate against any configured peer, "
+                                         "dropping\n", cfg.name, from_ip, ntohs(from.sin_port));
+                    } else if (udp_send(&udp, response, (size_t)response_len, &from) < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake "
+                                         "response to '%s': %s\n",
+                                cfg.name, matched->config->host, strerror(errno));
+                    } else {
+                        matched->addr = from;
+                        matched->addr_resolved = 1;
+                        matched->last_rx_activity_ms = monotonic_ms();
+                        matched->last_tx_activity_ms = matched->last_rx_activity_ms;
+                        char from_ip[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
+                        printf("[forgevpn] peer '%s' handshake complete with '%s' (learned "
+                               "endpoint %s:%u), session established\n",
+                               cfg.name, matched->config->host, from_ip, ntohs(from.sin_port));
+                        fflush(stdout);
+                    }
+                } else if (ps == NULL) {
+                    char from_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
+                    fprintf(stderr, "[forgevpn] peer '%s': received a datagram from "
+                                     "unrecognized %s:%u, dropping\n",
+                            cfg.name, from_ip, ntohs(from.sin_port));
+                } else if (cipher_buf[0] == SESSION_MSG_HANDSHAKE_INIT &&
+                           ps->config->role == CRYPTO_ROLE_RESPONDER) {
+                    /* Address already known (a prior handshake or DNS
+                     * resolution); this is a straightforward (re)handshake. */
+                    unsigned char response[SESSION_HANDSHAKE_MSG_LEN];
+                    ssize_t response_len = session_handle_init(&ps->session, cipher_buf,
+                                                                 (size_t)n, response,
+                                                                 sizeof(response));
+                    if (response_len < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': rejected a malformed, "
+                                         "unauthenticated, or stale handshake init from '%s'\n",
+                                cfg.name, ps->config->host);
+                    } else if (udp_send(&udp, response, (size_t)response_len, &ps->addr) < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake "
+                                         "response to '%s': %s\n",
+                                cfg.name, ps->config->host, strerror(errno));
+                    } else {
+                        ps->last_rx_activity_ms = monotonic_ms();
+                        ps->last_tx_activity_ms = ps->last_rx_activity_ms;
+                        printf("[forgevpn] peer '%s' handshake complete with '%s', session "
+                               "established\n", cfg.name, ps->config->host);
+                        fflush(stdout);
+                    }
+                } else if (cipher_buf[0] == SESSION_MSG_HANDSHAKE_RESPONSE &&
+                           ps->config->role == CRYPTO_ROLE_INITIATOR) {
+                    if (session_handle_response(&ps->session, cipher_buf, (size_t)n) < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': rejected a malformed, "
+                                         "unauthenticated, or stale handshake response from "
+                                         "'%s'\n", cfg.name, ps->config->host);
+                    } else {
+                        ps->last_rx_activity_ms = monotonic_ms();
+                        printf("[forgevpn] peer '%s' handshake complete with '%s', session "
+                               "established\n", cfg.name, ps->config->host);
+                        fflush(stdout);
+                    }
+                } else if (cipher_buf[0] == SESSION_MSG_DATA) {
+                    ssize_t opened_len = session_open_data(&ps->session, cipher_buf, (size_t)n,
+                                                             plain_buf, sizeof(plain_buf));
+                    if (opened_len < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': dropping a data packet from "
+                                         "'%s' (not established, failed authentication, or "
+                                         "replayed)\n", cfg.name, ps->config->host);
+                    } else if (opened_len == 0) {
+                        ps->last_rx_activity_ms = monotonic_ms();
+                        printf("[forgevpn] peer '%s' received keepalive from '%s'\n",
+                               cfg.name, ps->config->host);
+                        fflush(stdout);
+                    } else if (tun_write(&tun, plain_buf, (size_t)opened_len) < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': tun_write error: %s\n",
+                                cfg.name, strerror(errno));
+                    } else {
+                        ps->last_rx_activity_ms = monotonic_ms();
+                        printf("[forgevpn] peer '%s' udp -> tun (%s): %zd bytes "
+                               "(opened from %zd)\n",
+                               cfg.name, ps->config->host, opened_len, n);
+                        fflush(stdout);
+                    }
+                } else {
+                    fprintf(stderr, "[forgevpn] peer '%s': dropping unexpected message "
+                                     "(type %u) from '%s' for its role/state\n",
+                            cfg.name, (unsigned)cipher_buf[0], ps->config->host);
+                }
             }
         }
 
-        if (cfg.has_peer) {
+        if (cfg.peer_count > 0) {
             uint64_t now = monotonic_ms();
 
-            if (session.state == SESSION_STATE_ESTABLISHED &&
-                now - last_tx_activity_ms >= KEEPALIVE_INTERVAL_MS) {
-                ssize_t sealed_len = session_seal_data(&session, EMPTY_PAYLOAD, 0,
-                                                         cipher_buf, sizeof(cipher_buf));
-                if (sealed_len < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': failed to build keepalive\n",
-                            cfg.name);
-                } else if (udp_send(&udp, cipher_buf, (size_t)sealed_len, &peer_addr) < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': failed to send keepalive: %s\n",
-                            cfg.name, strerror(errno));
-                } else {
-                    printf("[forgevpn] peer '%s' sent keepalive\n", cfg.name);
-                    fflush(stdout);
-                }
-                last_tx_activity_ms = now;
-            }
+            for (int i = 0; i < cfg.peer_count; i++) {
+                peer_session_t *ps = &peers[i];
 
-            if (cfg.role == CRYPTO_ROLE_INITIATOR && now - last_rx_activity_ms >= SESSION_TIMEOUT_MS) {
-                printf("[forgevpn] peer '%s' heard nothing from peer in %ums, re-handshaking\n",
-                       cfg.name, (unsigned)(now - last_rx_activity_ms));
-                fflush(stdout);
-                session_start_handshake(&session);
-                send_handshake_init(cfg.name, &session, &udp, &peer_addr,
-                                     cipher_buf, sizeof(cipher_buf));
-                last_rx_activity_ms = now;
-                last_tx_activity_ms = now;
+                if (ps->addr_resolved && ps->session.state == SESSION_STATE_ESTABLISHED &&
+                    now - ps->last_tx_activity_ms >= KEEPALIVE_INTERVAL_MS) {
+                    ssize_t sealed_len = session_seal_data(&ps->session, EMPTY_PAYLOAD, 0,
+                                                             cipher_buf, sizeof(cipher_buf));
+                    if (sealed_len < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': failed to build keepalive for "
+                                         "'%s'\n", cfg.name, ps->config->host);
+                    } else if (udp_send(&udp, cipher_buf, (size_t)sealed_len, &ps->addr) < 0) {
+                        fprintf(stderr, "[forgevpn] peer '%s': failed to send keepalive to "
+                                         "'%s': %s\n",
+                                cfg.name, ps->config->host, strerror(errno));
+                    } else {
+                        printf("[forgevpn] peer '%s' sent keepalive to '%s'\n",
+                               cfg.name, ps->config->host);
+                        fflush(stdout);
+                    }
+                    ps->last_tx_activity_ms = now;
+                }
+
+                if (ps->config->role == CRYPTO_ROLE_INITIATOR &&
+                    now - ps->last_rx_activity_ms >= SESSION_TIMEOUT_MS) {
+                    if (ps->addr_resolved) {
+                        printf("[forgevpn] peer '%s' heard nothing from '%s' in %ums, "
+                               "re-handshaking\n",
+                               cfg.name, ps->config->host,
+                               (unsigned)(now - ps->last_rx_activity_ms));
+                        fflush(stdout);
+                    }
+                    initiate_handshake(ps, cfg.name, &udp, cipher_buf, sizeof(cipher_buf), now);
+                }
             }
         }
     }

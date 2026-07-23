@@ -20,6 +20,7 @@ add_library(forgevpn_core STATIC
     src/config.c
     src/crypto.c
     src/session.c
+    src/routing.c
 )
 target_include_directories(forgevpn_core PUBLIC include ${SODIUM_INCLUDE_DIRS})
 target_link_libraries(forgevpn_core PUBLIC ${SODIUM_LIBRARIES})
@@ -52,6 +53,10 @@ add_test(NAME crypto_test COMMAND crypto_test)
 add_executable(session_test tests/session_test.c)
 target_link_libraries(session_test PRIVATE forgevpn_core)
 add_test(NAME session_test COMMAND session_test)
+
+add_executable(routing_test tests/routing_test.c)
+target_link_libraries(routing_test PRIVATE forgevpn_core)
+add_test(NAME routing_test COMMAND routing_test)
 
 add_test(
     NAME smoke_test

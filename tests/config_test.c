@@ -1,12 +1,13 @@
 /*
- * Unit tests for the configuration parser: a fully populated file (with
- * key material), a capture-only file (no [Peer] section, relying on
- * defaults), and the various required-field rejections.
+ * Unit tests for the configuration parser: a fully populated file with
+ * multiple [Peer] sections, a capture-only file (no [Peer] section,
+ * relying on defaults), and the various required-field rejections.
  */
 
 #include "config.h"
 #include "crypto.h"
 
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -52,7 +53,8 @@ static int test_valid_config(void)
               "[Peer]\n"
               "Endpoint = peer2:51820\n"
               "PublicKey = %s\n"
-              "Role = initiator\n",
+              "Role = initiator\n"
+              "AllowedIPs = 10.8.0.12/32\n",
               private_key, public_key);
 
     if (write_file(path, contents) != 0) {
@@ -70,8 +72,11 @@ static int test_valid_config(void)
     char decoded_public_key[CRYPTO_KEY_TEXT_LEN];
     crypto_encode_base64(cfg.private_key.bytes, sizeof(cfg.private_key.bytes),
                           decoded_private_key, sizeof(decoded_private_key));
-    crypto_encode_base64(cfg.peer_public_key.bytes, sizeof(cfg.peer_public_key.bytes),
+    crypto_encode_base64(cfg.peers[0].public_key.bytes, sizeof(cfg.peers[0].public_key.bytes),
                           decoded_public_key, sizeof(decoded_public_key));
+
+    struct in_addr expected_allowed;
+    inet_pton(AF_INET, "10.8.0.12", &expected_allowed);
 
     if (strcmp(cfg.name, "peer1") != 0 ||
         strcmp(cfg.tun_name, "forge9") != 0 ||
@@ -80,16 +85,129 @@ static int test_valid_config(void)
         cfg.listen_port != 51821 ||
         !cfg.has_private_key ||
         strcmp(decoded_private_key, private_key) != 0 ||
-        !cfg.has_peer ||
-        strcmp(cfg.peer_host, "peer2") != 0 ||
-        cfg.peer_port != 51820 ||
+        cfg.peer_count != 1 ||
+        strcmp(cfg.peers[0].host, "peer2") != 0 ||
+        cfg.peers[0].port != 51820 ||
         strcmp(decoded_public_key, public_key) != 0 ||
-        cfg.role != CRYPTO_ROLE_INITIATOR) {
+        cfg.peers[0].role != CRYPTO_ROLE_INITIATOR ||
+        cfg.peers[0].allowed_address.s_addr != expected_allowed.s_addr ||
+        cfg.peers[0].allowed_prefix != 32) {
         fprintf(stderr, "test_valid_config: parsed fields do not match expected values\n");
         return 1;
     }
 
     printf("test_valid_config: passed\n");
+    return 0;
+}
+
+static int test_multiple_peers_parsed(void)
+{
+    const char *path = "/tmp/forgevpn_config_test_multi.conf";
+
+    char private_key[CRYPTO_KEY_TEXT_LEN];
+    char pub_a[CRYPTO_KEY_TEXT_LEN];
+    char pub_b[CRYPTO_KEY_TEXT_LEN];
+    char pub_c[CRYPTO_KEY_TEXT_LEN];
+    generate_key_text(private_key);
+    generate_key_text(pub_a);
+    generate_key_text(pub_b);
+    generate_key_text(pub_c);
+
+    char contents[2048];
+    snprintf(contents, sizeof(contents),
+              "[Interface]\n"
+              "Address = 10.8.0.11/24\n"
+              "PrivateKey = %s\n"
+              "\n"
+              "[Peer]\n"
+              "Endpoint = peer2:51820\n"
+              "PublicKey = %s\n"
+              "Role = initiator\n"
+              "AllowedIPs = 10.8.0.12/32\n"
+              "\n"
+              "[Peer]\n"
+              "Endpoint = peer3:51820\n"
+              "PublicKey = %s\n"
+              "Role = responder\n"
+              "AllowedIPs = 10.8.0.13/32\n"
+              "\n"
+              "[Peer]\n"
+              "Endpoint = peer4:51820\n"
+              "PublicKey = %s\n"
+              "Role = initiator\n"
+              "AllowedIPs = 10.8.0.14/32\n",
+              private_key, pub_a, pub_b, pub_c);
+
+    if (write_file(path, contents) != 0) {
+        fprintf(stderr, "test_multiple_peers_parsed: failed to write fixture\n");
+        return 1;
+    }
+
+    forgevpn_config_t cfg;
+    if (config_load(path, &cfg) != 0) {
+        fprintf(stderr, "test_multiple_peers_parsed: config_load failed unexpectedly\n");
+        return 1;
+    }
+
+    if (cfg.peer_count != 3) {
+        fprintf(stderr, "test_multiple_peers_parsed: expected 3 peers, got %d\n", cfg.peer_count);
+        return 1;
+    }
+    if (strcmp(cfg.peers[0].host, "peer2") != 0 || cfg.peers[0].role != CRYPTO_ROLE_INITIATOR) {
+        fprintf(stderr, "test_multiple_peers_parsed: peer 0 fields wrong\n");
+        return 1;
+    }
+    if (strcmp(cfg.peers[1].host, "peer3") != 0 || cfg.peers[1].role != CRYPTO_ROLE_RESPONDER) {
+        fprintf(stderr, "test_multiple_peers_parsed: peer 1 fields wrong\n");
+        return 1;
+    }
+    if (strcmp(cfg.peers[2].host, "peer4") != 0 || cfg.peers[2].role != CRYPTO_ROLE_INITIATOR) {
+        fprintf(stderr, "test_multiple_peers_parsed: peer 2 fields wrong\n");
+        return 1;
+    }
+
+    printf("test_multiple_peers_parsed: passed\n");
+    return 0;
+}
+
+static int test_too_many_peers_rejected(void)
+{
+    const char *path = "/tmp/forgevpn_config_test_too_many.conf";
+
+    char private_key[CRYPTO_KEY_TEXT_LEN];
+    generate_key_text(private_key);
+
+    char contents[4096];
+    int offset = snprintf(contents, sizeof(contents),
+                           "[Interface]\n"
+                           "Address = 10.8.0.11/24\n"
+                           "PrivateKey = %s\n\n",
+                           private_key);
+
+    for (int i = 0; i < CONFIG_MAX_PEERS + 1; i++) {
+        char pub[CRYPTO_KEY_TEXT_LEN];
+        generate_key_text(pub);
+        offset += snprintf(contents + offset, sizeof(contents) - (size_t)offset,
+                            "[Peer]\n"
+                            "Endpoint = peer%d:51820\n"
+                            "PublicKey = %s\n"
+                            "Role = initiator\n"
+                            "AllowedIPs = 10.8.0.%d/32\n\n",
+                            i + 2, pub, i + 2);
+    }
+
+    if (write_file(path, contents) != 0) {
+        fprintf(stderr, "test_too_many_peers_rejected: failed to write fixture\n");
+        return 1;
+    }
+
+    forgevpn_config_t cfg;
+    if (config_load(path, &cfg) == 0) {
+        fprintf(stderr, "test_too_many_peers_rejected: config_load unexpectedly succeeded\n");
+        return 1;
+    }
+
+    printf("test_too_many_peers_rejected: passed\n");
     return 0;
 }
 
@@ -111,8 +229,8 @@ static int test_capture_only_config(void)
         return 1;
     }
 
-    if (cfg.has_peer) {
-        fprintf(stderr, "test_capture_only_config: expected has_peer to be false\n");
+    if (cfg.peer_count != 0) {
+        fprintf(stderr, "test_capture_only_config: expected peer_count 0\n");
         return 1;
     }
     if (cfg.has_private_key) {
@@ -169,7 +287,8 @@ static int test_peer_without_private_key_rejected(void)
               "[Peer]\n"
               "Endpoint = peer2:51820\n"
               "PublicKey = %s\n"
-              "Role = initiator\n",
+              "Role = initiator\n"
+              "AllowedIPs = 10.8.0.12/32\n",
               public_key);
 
     if (write_file(path, contents) != 0) {
@@ -203,7 +322,8 @@ static int test_peer_without_public_key_rejected(void)
               "\n"
               "[Peer]\n"
               "Endpoint = peer2:51820\n"
-              "Role = initiator\n",
+              "Role = initiator\n"
+              "AllowedIPs = 10.8.0.12/32\n",
               private_key);
 
     if (write_file(path, contents) != 0) {
@@ -239,7 +359,8 @@ static int test_peer_without_role_rejected(void)
               "\n"
               "[Peer]\n"
               "Endpoint = peer2:51820\n"
-              "PublicKey = %s\n",
+              "PublicKey = %s\n"
+              "AllowedIPs = 10.8.0.12/32\n",
               private_key, public_key);
 
     if (write_file(path, contents) != 0) {
@@ -254,6 +375,43 @@ static int test_peer_without_role_rejected(void)
     }
 
     printf("test_peer_without_role_rejected: passed\n");
+    return 0;
+}
+
+static int test_peer_without_allowed_ips_rejected(void)
+{
+    const char *path = "/tmp/forgevpn_config_test_no_allowed_ips.conf";
+
+    char private_key[CRYPTO_KEY_TEXT_LEN];
+    char public_key[CRYPTO_KEY_TEXT_LEN];
+    generate_key_text(private_key);
+    generate_key_text(public_key);
+
+    char contents[512];
+    snprintf(contents, sizeof(contents),
+              "[Interface]\n"
+              "Address = 10.8.0.11/24\n"
+              "PrivateKey = %s\n"
+              "\n"
+              "[Peer]\n"
+              "Endpoint = peer2:51820\n"
+              "PublicKey = %s\n"
+              "Role = initiator\n",
+              private_key, public_key);
+
+    if (write_file(path, contents) != 0) {
+        fprintf(stderr, "test_peer_without_allowed_ips_rejected: failed to write fixture\n");
+        return 1;
+    }
+
+    forgevpn_config_t cfg;
+    if (config_load(path, &cfg) == 0) {
+        fprintf(stderr,
+                "test_peer_without_allowed_ips_rejected: config_load unexpectedly succeeded\n");
+        return 1;
+    }
+
+    printf("test_peer_without_allowed_ips_rejected: passed\n");
     return 0;
 }
 
@@ -289,11 +447,14 @@ int main(void)
 
     int failures = 0;
     failures += test_valid_config();
+    failures += test_multiple_peers_parsed();
+    failures += test_too_many_peers_rejected();
     failures += test_capture_only_config();
     failures += test_missing_address_rejected();
     failures += test_peer_without_private_key_rejected();
     failures += test_peer_without_public_key_rejected();
     failures += test_peer_without_role_rejected();
+    failures += test_peer_without_allowed_ips_rejected();
     failures += test_malformed_key_rejected();
     return failures == 0 ? 0 : 1;
 }

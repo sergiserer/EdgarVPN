@@ -1,8 +1,7 @@
 # Networking
 
 This document covers ForgeVPN's addressing scheme, the TUN interface
-module, and the UDP transport module. It will grow to cover routing and
-packet framing as those milestones land.
+module, the UDP transport module, and multi-peer routing.
 
 ## Two address spaces
 
@@ -15,8 +14,7 @@ separate:
   encrypted UDP packets across it, and it has no knowledge of VPN traffic.
 * **Overlay (`10.8.0.0/24`, assigned to each peer's TUN interface)** — the
   virtual VPN network. This is the address space applications inside a
-  peer would actually use to reach another peer once routing is
-  implemented.
+  peer actually use to reach another peer.
 
 Keeping these separate — rather than reusing the Docker network's
 addresses for the tunnel — mirrors how real VPNs (WireGuard, Tailscale)
@@ -73,82 +71,134 @@ A thin wrapper over BSD sockets: bind a UDP socket, resolve a `host:port`
 (including Docker Compose service names via the embedded DNS server) into
 a `sockaddr_in`, and send/receive datagrams. Kept just as small as the TUN
 module and deliberately protocol-agnostic — it doesn't know it's carrying
-VPN traffic, which is what will let the cryptography milestones wrap
-payloads before they reach `udp_send` without touching this module.
+VPN traffic. Every peer shares **one** UDP socket for all of its
+relationships; see "Multi-peer routing" below for how inbound datagrams
+get attributed to the right one.
+
+## Multi-peer routing (`include/routing.h`, `src/routing.c`)
+
+A node can have any number of `[Peer]` relationships (see
+`docs/CONFIGURATION.md`), each with its own handshake session
+(`docs/CRYPTOGRAPHY.md`). Two problems follow from that: given an
+outbound packet from the TUN device, which peer should it go to? And
+given an inbound UDP datagram, which peer did it come from?
+
+**Outbound (routing table lookup):** each `[Peer]` section has an
+`AllowedIPs` CIDR range. `routing_parse_ipv4_dest` reads the destination
+address straight out of the raw IPv4 header the kernel handed to the TUN
+device (bytes 16-19, per RFC 791 -- no framework, just the same
+by-hand-parsing spirit as the rest of this project), and
+`routing_find_peer_for_dest` returns whichever configured peer's
+`AllowedIPs` covers it -- the first match, in the order `[Peer]` sections
+appear in the config file. No match means "no route to host": the packet
+is dropped and logged, the same way a real router would refuse to
+forward traffic it has no route for. A non-IPv4 packet (e.g. IPv6
+neighbor discovery traffic the kernel sometimes puts on the TUN device)
+is rejected the same way, since there's nothing meaningful to route it
+by.
+
+**Inbound (peer attribution):** every peer shares one UDP socket, so
+`main.c` has to figure out who sent each datagram. The straightforward
+case, `find_peer_by_addr`, matches the datagram's source address against
+every peer whose address is already known. But a peer we're a
+*responder* toward doesn't necessarily have a known address yet -- see
+"Connecting without DNS" below.
+
+## Connecting without DNS: initiators resolve, responders learn
+
+Only an **initiator** relationship needs to resolve `Endpoint` up front:
+it has to know where to send the first `HANDSHAKE_INIT`. A **responder**
+relationship needs no DNS resolution at all. Its session is initialized
+from the configured static keys alone (no network access required), and
+it waits; when a `HANDSHAKE_INIT` arrives from an address it doesn't
+recognize, `find_responder_for_init` tries that message against every
+configured responder relationship's static keys until one successfully
+authenticates it. On success, the sender's address is *learned* from the
+packet itself and remembered from then on -- the same mechanism
+WireGuard calls endpoint roaming.
+
+This isn't just a nicety -- it fixes a real bug found while validating
+the full 5-peer mesh (`docs/ROADMAP.md`, Milestone 8): in the `demo`
+profile, `peer1` and `peer2` start at nearly the same moment, and it's a
+coin flip which one Docker's embedded DNS finishes registering first. In
+the earlier design, if `peer2` hadn't yet resolved `peer1`'s hostname for
+its *own* bookkeeping, it would drop `peer1`'s incoming handshake init as
+"from an unrecognized address" even though the init was perfectly valid
+-- both sides would eventually recover once their independent 15-second
+retry timers happened to align, but only after an avoidable delay.
+Letting a responder learn its peer's address from the first authenticated
+packet, instead of requiring it to resolve that peer's hostname itself
+first, removes the race entirely: `peer2` doesn't need to know anything
+about where `peer1` is until `peer1` proves who it is.
 
 ## Bridging TUN and UDP (`src/main.c`)
 
-`forgevpn` now runs a `poll()` loop over two file descriptors at once: the
+`forgevpn` runs a `poll()` loop over two file descriptors at once: the
 TUN device and the UDP socket.
 
-* **TUN readable** → a packet arrived from the kernel (e.g. an application
-  sent traffic to another peer's overlay address). If a peer is
-  configured *and* its handshake session is established (see
-  `docs/CRYPTOGRAPHY.md`), the packet is sealed with ChaCha20-Poly1305
-  and forwarded via `udp_send`; if the session isn't established yet, the
-  packet is dropped and logged; if no peer is configured at all, it is
-  only logged (see "Capture-only peers" below).
-* **UDP readable** → a datagram arrived from the network. Its first byte
-  is an unencrypted message-type tag (`docs/CRYPTOGRAPHY.md`) telling
-  `main.c` whether this is a handshake message or data. Handshake
-  messages advance the session state machine; data messages are
-  decrypted, authenticated, checked for replay, and only then written
-  into the TUN device with `tun_write` -- anything that fails any of
-  those checks is dropped, not written. The kernel then routes accepted
-  traffic locally, exactly as if it had arrived on a physical interface.
+* **TUN readable** → a packet arrived from the kernel (e.g. an
+  application sent traffic to another peer's overlay address). Routed by
+  destination address (above) to a configured peer; forwarded via
+  `udp_send`, sealed with ChaCha20-Poly1305, if that peer's session is
+  established, dropped and logged otherwise. If no peers are configured
+  at all, it is only logged (see "Capture-only peers" below).
+* **UDP readable** → a datagram arrived from the network. Attributed to
+  a peer as described above, then dispatched by its first (unencrypted)
+  message-type byte (`docs/CRYPTOGRAPHY.md`): handshake messages advance
+  that peer's session state machine; data messages are decrypted,
+  authenticated, checked for replay, and only then written into the TUN
+  device with `tun_write` -- anything that fails any of those checks is
+  dropped, not written.
 
-`poll()` was chosen over `select()` because it has no fixed descriptor-set
-size limit and a cleaner API — relevant once a later milestone needs to
-watch several peer sockets at once for real multi-peer routing. It's now
-also given a 1-second timeout (rather than blocking forever) so `main.c`
-can periodically check its keepalive/reconnection timers even when
-neither fd has anything ready — see "Session lifecycle" below.
+`poll()` was chosen over `select()` because it has no fixed
+descriptor-set size limit and a cleaner API. It's given a 1-second
+timeout (rather than blocking forever) so `main.c` can periodically check
+every peer's keepalive/reconnection timers even when neither fd has
+anything ready.
 
-As of the cryptography, handshake, and session-lifecycle milestones,
-tunnel traffic between two configured peers is encrypted, authenticated,
+Tunnel traffic between established peers is encrypted, authenticated,
 forward-secret, self-healing after a peer restarts, and tolerant of UDP
 reordering — see `docs/CRYPTOGRAPHY.md` for the packet format, the
 handshake protocol, and what security properties are (and are not)
-provided yet (no key rotation independent of reconnection, fixed
-non-configurable timers).
+provided yet.
 
 ### Session lifecycle
 
-An idle established session sends a keepalive (an empty `DATA` message)
-if it hasn't sent anything in `KEEPALIVE_INTERVAL_MS`. The initiator
-additionally tracks how long it's been since it last heard *anything*
-valid from its peer; past `SESSION_TIMEOUT_MS`, it assumes the session is
-dead and re-runs the handshake with a fresh ephemeral key pair. The
-responder needs no equivalent timer -- it simply accepts a fresh
-`HANDSHAKE_INIT` whenever one arrives, established or not. Full reasoning
-and the counter-replay protection that makes this safe are in
-`docs/CRYPTOGRAPHY.md`.
+An idle established relationship sends a keepalive (an empty `DATA`
+message) if it hasn't sent anything in `KEEPALIVE_INTERVAL_MS`. For each
+relationship where this node is the initiator, it additionally tracks
+how long it's been since it last heard *anything* valid from that peer;
+past `SESSION_TIMEOUT_MS`, it assumes the session is dead (also retrying
+DNS resolution if needed) and re-runs the handshake with a fresh
+ephemeral key pair. A responder relationship needs no equivalent timer --
+it simply accepts a fresh `HANDSHAKE_INIT` whenever one arrives,
+established or not. Full reasoning and the counter-replay protection
+that makes this safe are in `docs/CRYPTOGRAPHY.md`.
 
 ### Capture-only peers
 
-A peer whose config file has no `[Peer]` section still binds its UDP
-socket (so another peer could reach it) but does not forward TUN traffic
-anywhere — it just logs captured packet sizes, as in the previous
-milestone. This lets the `multi-peer` Compose profile keep working with an
-odd number of peers before real N-way routing exists: `peer1`↔`peer2` and
-`peer3`↔`peer4` are paired and forward traffic to each other; `peer5` runs
-capture-only. See `docs/CONFIGURATION.md` for the file format.
+A peer whose config file has no `[Peer]` sections still binds its UDP
+socket (so a peer could theoretically reach it, though nothing will
+authenticate without a matching key configured) but does not forward TUN
+traffic anywhere — it just logs captured packet sizes. Not currently
+used by any peer in the demo topology (see "Full mesh" in
+`docs/CONFIGURATION.md`), but still exercised: `smoke_test.sh` runs
+`forgevpn` with no `[Peer]` section at all.
 
 ### Demonstrated behavior
 
-With the `demo` profile (`peer1` ↔ `peer2`, both configured with a
-`[Peer]` section and matching key pairs), `peer1` (the `initiator`) sends
-a handshake init as soon as it starts; `peer2` (the `responder`) replies
-and both sessions become established within one round trip. From then
-on, a full ping round trip works over the now forward-secret, encrypted
-tunnel: `ping 10.8.0.12` from inside `peer1` sends an
-ICMP echo through `peer1`'s TUN, across UDP to `peer2`, into `peer2`'s TUN
-— at which point the kernel on `peer2` treats it as normal inbound traffic
-to its own address and generates an ICMP echo reply, which routes back out
-through `peer2`'s TUN, back across UDP, and into `peer1`'s TUN, where the
-original `ping` process receives it. No part of that path is VPN-specific
-code recognizing ICMP; it works because both kernels see ordinary IP
-traffic on a point-to-point interface.
+With the `multi-peer` profile, all five peers connect to all four others
+(`docs/CONFIGURATION.md`'s full mesh) -- confirmed by each peer's log
+showing exactly four `handshake complete` lines, one per relationship.
+`ping` between *any* two peers' overlay addresses works directly, not
+just adjacent ones: `peer1` → `peer5`, `peer2` → `peer4`, and
+non-adjacent pairs all round-trip normally, each packet routed by
+`routing_find_peer_for_dest` to the right session independently. With
+the `demo` profile (`peer1`/`peer2` only, three of their four mesh
+relationships pointing at peers that aren't running), those three
+relationships log a calm, throttled "not resolvable yet" every 15
+seconds rather than blocking startup or spamming — see "Connecting
+without DNS" above.
 
 ### Known limitations
 
@@ -157,8 +207,13 @@ traffic on a point-to-point interface.
   timeout intervals — see `docs/CRYPTOGRAPHY.md` for the full list.
 * No handling of MTU/fragmentation: encryption adds a few bytes of
   overhead to every packet (1-byte type + `CRYPTO_PACKET_OVERHEAD`, 24
-  bytes), which isn't accounted for against the TUN
-  interface's MTU. Not yet a practical problem at the packet sizes this
-  demo generates (ICMP), but worth revisiting before larger payloads.
-* The `[Peer]` section holds a single fixed remote peer, not a routing
-  table — real multi-peer forwarding is future work (see the roadmap).
+  bytes), which isn't accounted for against the TUN interface's MTU. Not
+  yet a practical problem at the packet sizes this demo generates
+  (ICMP), but worth revisiting before larger payloads.
+* `AllowedIPs` holds exactly one `/32`-or-wider CIDR range per peer, not
+  a comma-separated list like real WireGuard -- sufficient for this
+  project's peers, each of which only ever advertises its own single
+  overlay address.
+* Routing is first-match over a flat list of up to 8 peers, not a
+  longest-prefix-match trie -- fine at this scale, would need revisiting
+  for a much larger mesh.
