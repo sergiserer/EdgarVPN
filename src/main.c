@@ -2,19 +2,23 @@
  * Entry point for the ForgeVPN peer daemon.
  *
  * When a peer has a configured [Peer] (see docs/CONFIGURATION.md), it
- * derives session keys from its own PrivateKey and the peer's PublicKey
- * at startup (see docs/CRYPTOGRAPHY.md for why this happens locally
- * rather than over a live handshake, and its forward-secrecy
- * limitation), then bridges its TUN device to a UDP socket exactly as
- * in the previous milestone -- except every packet is now sealed with
- * ChaCha20-Poly1305 before being sent, and every inbound datagram must
- * authenticate and pass a monotonic replay check before being written to
- * the TUN device. A peer with no [Peer] section still runs capture-only,
- * as before -- there is no session to encrypt with.
+ * runs a live handshake (src/session.c) with that peer before any data
+ * flows: an initiator sends a HANDSHAKE_INIT and a responder replies
+ * with a HANDSHAKE_RESPONSE, each carrying a fresh ephemeral public key.
+ * Once both sides have derived matching forward-secret data keys from
+ * that exchange, the session is established and the TUN device is
+ * bridged to the UDP socket exactly as in the previous milestone --
+ * every outbound packet sealed, every inbound datagram authenticated and
+ * replay-checked before being written to the TUN device. See
+ * docs/CRYPTOGRAPHY.md for the full protocol and its current
+ * limitations (no re-handshake/reconnection yet). A peer with no [Peer]
+ * section still runs capture-only, as before -- there is no session to
+ * encrypt with.
  */
 
 #include "config.h"
 #include "crypto.h"
+#include "session.h"
 #include "tun.h"
 #include "udp.h"
 
@@ -22,7 +26,6 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +33,7 @@
 
 #define DEFAULT_CONFIG_PATH "/etc/forgevpn/forgevpn.conf"
 #define MAX_PACKET_SIZE 2048
+#define SEALED_BUF_SIZE (SESSION_DATA_OVERHEAD + MAX_PACKET_SIZE)
 #define ENDPOINT_RESOLVE_RETRIES 20
 #define ENDPOINT_RESOLVE_DELAY_US 500000
 
@@ -103,8 +107,9 @@ int main(void)
 
     struct sockaddr_in peer_addr;
     memset(&peer_addr, 0, sizeof(peer_addr));
-    crypto_session_keys_t session_keys;
-    memset(&session_keys, 0, sizeof(session_keys));
+    session_t session;
+    memset(&session, 0, sizeof(session));
+    unsigned char cipher_buf[SEALED_BUF_SIZE];
 
     if (cfg.has_peer) {
         if (resolve_peer_with_retry(cfg.name, cfg.peer_host, cfg.peer_port, &peer_addr) != 0) {
@@ -117,9 +122,9 @@ int main(void)
 
         crypto_public_key_t local_pk;
         crypto_derive_public_key(&cfg.private_key, &local_pk);
-        if (crypto_derive_session_keys(cfg.role, &local_pk, &cfg.private_key,
-                                        &cfg.peer_public_key, &session_keys) != 0) {
-            fprintf(stderr, "[forgevpn] peer '%s': failed to derive session keys "
+        if (session_init(&session, cfg.role, &local_pk, &cfg.private_key,
+                          &cfg.peer_public_key) != 0) {
+            fprintf(stderr, "[forgevpn] peer '%s': failed to initialize session "
                              "(peer's PublicKey may be invalid)\n", cfg.name);
             udp_close(&udp);
             tun_close(&tun);
@@ -128,10 +133,23 @@ int main(void)
 
         char peer_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip));
-        printf("[forgevpn] peer '%s' up: interface '%s' (%s/%s), UDP :%u <-> peer %s:%u "
-               "(encrypted session established)\n",
+        printf("[forgevpn] peer '%s' up: interface '%s' (%s/%s), UDP :%u <-> peer %s:%u\n",
                cfg.name, tun.name, cfg.tun_address, cfg.tun_netmask, cfg.listen_port,
                peer_ip, ntohs(peer_addr.sin_port));
+
+        if (cfg.role == CRYPTO_ROLE_INITIATOR) {
+            ssize_t init_len = session_build_init(&session, cipher_buf, sizeof(cipher_buf));
+            if (init_len < 0 || udp_send(&udp, cipher_buf, (size_t)init_len, &peer_addr) < 0) {
+                fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake init\n",
+                        cfg.name);
+                udp_close(&udp);
+                tun_close(&tun);
+                return 1;
+            }
+            printf("[forgevpn] peer '%s' sent handshake init, awaiting response\n", cfg.name);
+        } else {
+            printf("[forgevpn] peer '%s' awaiting handshake init from peer\n", cfg.name);
+        }
     } else {
         printf("[forgevpn] peer '%s' up: interface '%s' (%s/%s), UDP :%u, "
                "no peer configured (capture-only)\n",
@@ -146,10 +164,6 @@ int main(void)
     fds[1].events = POLLIN;
 
     unsigned char plain_buf[MAX_PACKET_SIZE];
-    unsigned char cipher_buf[MAX_PACKET_SIZE + CRYPTO_PACKET_OVERHEAD];
-    uint64_t tx_counter = 0;
-    uint64_t highest_rx_counter = 0;
-    int have_received_any = 0;
 
     while (g_running) {
         int ready = poll(fds, 2, -1);
@@ -168,9 +182,16 @@ int main(void)
                     fprintf(stderr, "[forgevpn] peer '%s': tun_read error: %s\n",
                             cfg.name, strerror(errno));
                 }
-            } else if (cfg.has_peer) {
-                ssize_t sealed_len = crypto_seal(session_keys.tx, tx_counter, plain_buf,
-                                                  (size_t)n, cipher_buf, sizeof(cipher_buf));
+            } else if (!cfg.has_peer) {
+                printf("[forgevpn] peer '%s' captured packet: %zd bytes\n", cfg.name, n);
+                fflush(stdout);
+            } else if (session.state != SESSION_STATE_ESTABLISHED) {
+                printf("[forgevpn] peer '%s' session not established yet, dropping "
+                       "%zd-byte outbound packet\n", cfg.name, n);
+                fflush(stdout);
+            } else {
+                ssize_t sealed_len = session_seal_data(&session, plain_buf, (size_t)n,
+                                                         cipher_buf, sizeof(cipher_buf));
                 if (sealed_len < 0) {
                     fprintf(stderr, "[forgevpn] peer '%s': failed to encrypt a %zd-byte packet\n",
                             cfg.name, n);
@@ -178,14 +199,10 @@ int main(void)
                     fprintf(stderr, "[forgevpn] peer '%s': udp_send error: %s\n",
                             cfg.name, strerror(errno));
                 } else {
-                    tx_counter++;
                     printf("[forgevpn] peer '%s' tun -> udp: %zd bytes (sealed to %zd)\n",
                            cfg.name, n, sealed_len);
                     fflush(stdout);
                 }
-            } else {
-                printf("[forgevpn] peer '%s' captured packet: %zd bytes\n", cfg.name, n);
-                fflush(stdout);
             }
         }
 
@@ -197,31 +214,55 @@ int main(void)
                     fprintf(stderr, "[forgevpn] peer '%s': udp_recv error: %s\n",
                             cfg.name, strerror(errno));
                 }
-            } else if (!cfg.has_peer) {
-                printf("[forgevpn] peer '%s' received %zd bytes on UDP but no peer is "
-                       "configured, dropping\n", cfg.name, n);
+            } else if (!cfg.has_peer || n < 1) {
+                printf("[forgevpn] peer '%s' received %zd bytes on UDP with no session, "
+                       "dropping\n", cfg.name, n);
                 fflush(stdout);
-            } else {
-                uint64_t counter = 0;
-                ssize_t opened_len = crypto_open(session_keys.rx, cipher_buf, (size_t)n,
-                                                  plain_buf, sizeof(plain_buf), &counter);
+            } else if (cipher_buf[0] == SESSION_MSG_HANDSHAKE_INIT &&
+                       cfg.role == CRYPTO_ROLE_RESPONDER) {
+                unsigned char response[SESSION_HANDSHAKE_MSG_LEN];
+                ssize_t response_len = session_handle_init(&session, cipher_buf, (size_t)n,
+                                                             response, sizeof(response));
+                if (response_len < 0) {
+                    fprintf(stderr, "[forgevpn] peer '%s': rejected a malformed or "
+                                     "unauthenticated handshake init\n", cfg.name);
+                } else if (udp_send(&udp, response, (size_t)response_len, &peer_addr) < 0) {
+                    fprintf(stderr, "[forgevpn] peer '%s': failed to send handshake response: "
+                                     "%s\n", cfg.name, strerror(errno));
+                } else {
+                    printf("[forgevpn] peer '%s' handshake complete, session established\n",
+                           cfg.name);
+                    fflush(stdout);
+                }
+            } else if (cipher_buf[0] == SESSION_MSG_HANDSHAKE_RESPONSE &&
+                       cfg.role == CRYPTO_ROLE_INITIATOR) {
+                if (session_handle_response(&session, cipher_buf, (size_t)n) < 0) {
+                    fprintf(stderr, "[forgevpn] peer '%s': rejected a malformed or "
+                                     "unauthenticated handshake response\n", cfg.name);
+                } else {
+                    printf("[forgevpn] peer '%s' handshake complete, session established\n",
+                           cfg.name);
+                    fflush(stdout);
+                }
+            } else if (cipher_buf[0] == SESSION_MSG_DATA) {
+                ssize_t opened_len = session_open_data(&session, cipher_buf, (size_t)n,
+                                                         plain_buf, sizeof(plain_buf));
                 if (opened_len < 0) {
-                    fprintf(stderr, "[forgevpn] peer '%s': dropping a packet that failed "
-                                     "authentication\n", cfg.name);
-                } else if (have_received_any && counter <= highest_rx_counter) {
-                    fprintf(stderr, "[forgevpn] peer '%s': dropping replayed/out-of-order "
-                                     "packet (counter=%llu)\n",
-                            cfg.name, (unsigned long long)counter);
+                    fprintf(stderr, "[forgevpn] peer '%s': dropping a data packet (not "
+                                     "established, failed authentication, or replayed)\n",
+                            cfg.name);
                 } else if (tun_write(&tun, plain_buf, (size_t)opened_len) < 0) {
                     fprintf(stderr, "[forgevpn] peer '%s': tun_write error: %s\n",
                             cfg.name, strerror(errno));
                 } else {
-                    have_received_any = 1;
-                    highest_rx_counter = counter;
                     printf("[forgevpn] peer '%s' udp -> tun: %zd bytes (opened from %zd)\n",
                            cfg.name, opened_len, n);
                     fflush(stdout);
                 }
+            } else {
+                fprintf(stderr, "[forgevpn] peer '%s': dropping unexpected message "
+                                 "(type %u) for this peer's role/state\n",
+                        cfg.name, (unsigned)cipher_buf[0]);
             }
         }
     }

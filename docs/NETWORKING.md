@@ -83,25 +83,29 @@ TUN device and the UDP socket.
 
 * **TUN readable** → a packet arrived from the kernel (e.g. an application
   sent traffic to another peer's overlay address). If a peer is
-  configured, the packet is sealed with ChaCha20-Poly1305 (see
-  `docs/CRYPTOGRAPHY.md`) and forwarded via `udp_send`; otherwise it is
+  configured *and* its handshake session is established (see
+  `docs/CRYPTOGRAPHY.md`), the packet is sealed with ChaCha20-Poly1305
+  and forwarded via `udp_send`; if the session isn't established yet, the
+  packet is dropped and logged; if no peer is configured at all, it is
   only logged (see "Capture-only peers" below).
-* **UDP readable** → a datagram arrived from the network. If a peer is
-  configured, it's decrypted and authenticated, checked for replay, and
-  only then written into the TUN device with `tun_write` -- anything that
-  fails either check is dropped, not written. The kernel then routes
-  accepted traffic locally, exactly as if it had arrived on a physical
-  interface.
+* **UDP readable** → a datagram arrived from the network. Its first byte
+  is an unencrypted message-type tag (`docs/CRYPTOGRAPHY.md`) telling
+  `main.c` whether this is a handshake message or data. Handshake
+  messages advance the session state machine; data messages are
+  decrypted, authenticated, checked for replay, and only then written
+  into the TUN device with `tun_write` -- anything that fails any of
+  those checks is dropped, not written. The kernel then routes accepted
+  traffic locally, exactly as if it had arrived on a physical interface.
 
 `poll()` was chosen over `select()` because it has no fixed descriptor-set
 size limit and a cleaner API — relevant once a later milestone needs to
 watch several peer sockets at once for real multi-peer routing.
 
-As of the cryptography milestones, tunnel traffic between two configured
-peers is encrypted and authenticated end to end — see
-`docs/CRYPTOGRAPHY.md` for the packet format, the key exchange, and what
-security properties are (and are not) provided yet (there is no forward
-secrecy or key rotation so far).
+As of the cryptography and handshake milestones, tunnel traffic between
+two configured peers is encrypted, authenticated, and forward-secret --
+see `docs/CRYPTOGRAPHY.md` for the packet format, the handshake protocol,
+and what security properties are (and are not) provided yet (no
+reconnection, no key rotation, a simplified replay check).
 
 ### Capture-only peers
 
@@ -116,8 +120,11 @@ capture-only. See `docs/CONFIGURATION.md` for the file format.
 ### Demonstrated behavior
 
 With the `demo` profile (`peer1` ↔ `peer2`, both configured with a
-`[Peer]` section and matching key pairs), a full round trip works over
-an encrypted tunnel: `ping 10.8.0.12` from inside `peer1` sends an
+`[Peer]` section and matching key pairs), `peer1` (the `initiator`) sends
+a handshake init as soon as it starts; `peer2` (the `responder`) replies
+and both sessions become established within one round trip. From then
+on, a full ping round trip works over the now forward-secret, encrypted
+tunnel: `ping 10.8.0.12` from inside `peer1` sends an
 ICMP echo through `peer1`'s TUN, across UDP to `peer2`, into `peer2`'s TUN
 — at which point the kernel on `peer2` treats it as normal inbound traffic
 to its own address and generates an ICMP echo reply, which routes back out
@@ -128,11 +135,13 @@ traffic on a point-to-point interface.
 
 ### Known limitations
 
-* No forward secrecy or key rotation yet, and replay protection is a
-  simple strict-monotonic counter check rather than a sliding window —
-  see `docs/CRYPTOGRAPHY.md` for the full list.
-* No handling of MTU/fragmentation: encryption adds `CRYPTO_PACKET_OVERHEAD`
-  (24 bytes) to every packet, which isn't accounted for against the TUN
+* No reconnection or key rotation yet (each session supports exactly one
+  handshake per process lifetime), and replay protection is a simple
+  strict-monotonic counter check rather than a sliding window — see
+  `docs/CRYPTOGRAPHY.md` for the full list.
+* No handling of MTU/fragmentation: encryption adds a few bytes of
+  overhead to every packet (1-byte type + `CRYPTO_PACKET_OVERHEAD`, 24
+  bytes), which isn't accounted for against the TUN
   interface's MTU. Not yet a practical problem at the packet sizes this
   demo generates (ICMP), but worth revisiting before larger payloads.
 * The `[Peer]` section holds a single fixed remote peer, not a routing

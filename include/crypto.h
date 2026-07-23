@@ -126,4 +126,14 @@ ssize_t crypto_open(const unsigned char key[CRYPTO_SESSION_KEY_BYTES],
                      unsigned char *out, size_t out_len,
                      uint64_t *counter_out);
 
+/*
+ * Overwrites `len` bytes at `buf` with zeroes, in a way the compiler
+ * won't optimize away (unlike a plain memset, which is legal for a
+ * compiler to elide if it can prove `buf` is never read again). Use to
+ * erase ephemeral secret key material as soon as it's no longer needed
+ * -- see src/session.c, which wipes each ephemeral secret key right
+ * after the handshake step that consumes it.
+ */
+void crypto_wipe(void *buf, size_t len);
+
 #endif /* FORGEVPN_CRYPTO_H */

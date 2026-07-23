@@ -140,3 +140,8 @@ ssize_t crypto_open(const unsigned char key[CRYPTO_SESSION_KEY_BYTES],
     *counter_out = counter;
     return (ssize_t)plaintext_len;
 }
+
+void crypto_wipe(void *buf, size_t len)
+{
+    sodium_memzero(buf, len);
+}
