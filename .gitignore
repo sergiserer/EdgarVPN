@@ -1,0 +1,26 @@
+# Build output
+build/
+cmake-build-*/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Testing/
+
+# Object files
+*.o
+*.obj
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Internal session control docs -- not part of the public portfolio repo.
+docs/prompt.md
+docs/ROADMAP.md
+
+# Local Claude Code settings (machine-specific permissions).
+.claude/
