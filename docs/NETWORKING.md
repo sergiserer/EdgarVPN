@@ -99,13 +99,30 @@ TUN device and the UDP socket.
 
 `poll()` was chosen over `select()` because it has no fixed descriptor-set
 size limit and a cleaner API — relevant once a later milestone needs to
-watch several peer sockets at once for real multi-peer routing.
+watch several peer sockets at once for real multi-peer routing. It's now
+also given a 1-second timeout (rather than blocking forever) so `main.c`
+can periodically check its keepalive/reconnection timers even when
+neither fd has anything ready — see "Session lifecycle" below.
 
-As of the cryptography and handshake milestones, tunnel traffic between
-two configured peers is encrypted, authenticated, and forward-secret --
-see `docs/CRYPTOGRAPHY.md` for the packet format, the handshake protocol,
-and what security properties are (and are not) provided yet (no
-reconnection, no key rotation, a simplified replay check).
+As of the cryptography, handshake, and session-lifecycle milestones,
+tunnel traffic between two configured peers is encrypted, authenticated,
+forward-secret, self-healing after a peer restarts, and tolerant of UDP
+reordering — see `docs/CRYPTOGRAPHY.md` for the packet format, the
+handshake protocol, and what security properties are (and are not)
+provided yet (no key rotation independent of reconnection, fixed
+non-configurable timers).
+
+### Session lifecycle
+
+An idle established session sends a keepalive (an empty `DATA` message)
+if it hasn't sent anything in `KEEPALIVE_INTERVAL_MS`. The initiator
+additionally tracks how long it's been since it last heard *anything*
+valid from its peer; past `SESSION_TIMEOUT_MS`, it assumes the session is
+dead and re-runs the handshake with a fresh ephemeral key pair. The
+responder needs no equivalent timer -- it simply accepts a fresh
+`HANDSHAKE_INIT` whenever one arrives, established or not. Full reasoning
+and the counter-replay protection that makes this safe are in
+`docs/CRYPTOGRAPHY.md`.
 
 ### Capture-only peers
 
@@ -135,10 +152,9 @@ traffic on a point-to-point interface.
 
 ### Known limitations
 
-* No reconnection or key rotation yet (each session supports exactly one
-  handshake per process lifetime), and replay protection is a simple
-  strict-monotonic counter check rather than a sliding window — see
-  `docs/CRYPTOGRAPHY.md` for the full list.
+* No key rotation independent of a full reconnection, no DoS/flood
+  protection on the handshake, and fixed (not configurable) keepalive/
+  timeout intervals — see `docs/CRYPTOGRAPHY.md` for the full list.
 * No handling of MTU/fragmentation: encryption adds a few bytes of
   overhead to every packet (1-byte type + `CRYPTO_PACKET_OVERHEAD`, 24
   bytes), which isn't accounted for against the TUN
