@@ -10,7 +10,15 @@ set -eu
 
 BIN="${1:?usage: smoke_test.sh <path-to-forgevpn-binary>}"
 
-TUN_ADDRESS="10.8.0.254" TUN_NAME="fgsmoke0" "$BIN" &
+CONFIG_PATH="/tmp/forgevpn_smoke_test.conf"
+cat > "$CONFIG_PATH" <<'EOF'
+[Interface]
+Name = smoke-test-peer
+DeviceName = fgsmoke0
+Address = 10.8.0.254/24
+EOF
+
+CONFIG_FILE="$CONFIG_PATH" "$BIN" &
 PID=$!
 
 sleep 1

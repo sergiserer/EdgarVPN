@@ -63,15 +63,17 @@ docker compose --profile test up --build --abort-on-container-exit
 
 What actually runs today, peer by peer:
 
-* Each peer opens `/dev/net/tun`, creates a TUN interface, assigns it a virtual IP, and brings it up — all via direct `ioctl` calls (`TUNSETIFF`, `SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS`), not shell commands.
-* A `poll()`-based event loop bridges that TUN device to a UDP socket: packets are forwarded to a configured peer and written back from incoming datagrams. In the `demo` profile, this is enough for a real `ping` between two peers' overlay addresses to round-trip end to end.
+* Each peer reads its identity, interface, and remote peer from a config file — a small hand-written INI-style parser (`[Interface]`/`[Peer]` sections, WireGuard-style key names), no external dependency.
+* It then opens `/dev/net/tun`, creates a TUN interface, assigns it the configured virtual IP, and brings it up — all via direct `ioctl` calls (`TUNSETIFF`, `SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS`), not shell commands.
+* A `poll()`-based event loop bridges that TUN device to a UDP socket: packets are forwarded to the configured peer and written back from incoming datagrams. In the `demo` profile, this is enough for a real `ping` between two peers' overlay addresses to round-trip end to end.
 * Traffic is unauthenticated and unencrypted at this stage — anything arriving on a peer's UDP port is trusted. That's the next layer to add.
-* Not yet implemented: peer authentication, encryption, N-way routing between more than two peers, and a configuration file format — see the roadmap below.
+* Not yet implemented: peer authentication, encryption, and N-way routing between more than two peers — see the roadmap below.
 
 ## Documentation
 
 * [`docs/DOCKER.md`](docs/DOCKER.md) — Docker image and Compose network design: multi-stage builds, capabilities required for TUN, the profile system.
 * [`docs/NETWORKING.md`](docs/NETWORKING.md) — the underlay/overlay addressing scheme, the TUN module, and the UDP transport bridge.
+* [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — the peer configuration file format.
 
 ---
 
@@ -80,7 +82,7 @@ What actually runs today, peer by peer:
 * [x] Docker infrastructure & build pipeline (multi-stage image, Compose profiles, CI-ready test target)
 * [x] TUN interface module (create, configure, capture)
 * [x] UDP transport between peers (`poll()`-based bridge, real ping round-trip in the demo profile)
-* [ ] Configuration file format (peer identity, endpoints, keys)
+* [x] Configuration file format (`[Interface]`/`[Peer]` INI-style, mounted per peer via Compose volumes)
 * [ ] X25519 key exchange
 * [ ] ChaCha20-Poly1305 authenticated encryption, replay protection
 * [ ] Session lifecycle (handshake state machine, keepalive, reconnection)

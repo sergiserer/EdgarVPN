@@ -14,6 +14,7 @@ endif()
 add_library(forgevpn_core STATIC
     src/tun.c
     src/udp.c
+    src/config.c
 )
 target_include_directories(forgevpn_core PUBLIC include)
 
@@ -29,6 +30,10 @@ add_test(NAME tun_test COMMAND tun_test)
 add_executable(udp_test tests/udp_test.c)
 target_link_libraries(udp_test PRIVATE forgevpn_core)
 add_test(NAME udp_test COMMAND udp_test)
+
+add_executable(config_test tests/config_test.c)
+target_link_libraries(config_test PRIVATE forgevpn_core)
+add_test(NAME config_test COMMAND config_test)
 
 add_test(
     NAME smoke_test

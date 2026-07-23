@@ -23,8 +23,8 @@ addresses for the tunnel — mirrors how real VPNs (WireGuard, Tailscale)
 work: the underlay is whatever network happens to connect two hosts, and
 is irrelevant to the overlay addressing the VPN presents to applications.
 
-Each peer's static assignment (set via the `TUN_ADDRESS` environment
-variable in `docker-compose.yml`, one octet matching its underlay IP for
+Each peer's static assignment (set via the `Address` key in its config
+file, see `docs/CONFIGURATION.md`, one octet matching its underlay IP for
 readability):
 
 | Peer  | Underlay (Docker) | Overlay (TUN)  |
@@ -102,18 +102,19 @@ exist to do.
 
 ### Capture-only peers
 
-A peer with no `PEER_ENDPOINT` environment variable still binds its UDP
+A peer whose config file has no `[Peer]` section still binds its UDP
 socket (so another peer could reach it) but does not forward TUN traffic
 anywhere — it just logs captured packet sizes, as in the previous
 milestone. This lets the `multi-peer` Compose profile keep working with an
 odd number of peers before real N-way routing exists: `peer1`↔`peer2` and
 `peer3`↔`peer4` are paired and forward traffic to each other; `peer5` runs
-capture-only.
+capture-only. See `docs/CONFIGURATION.md` for the file format.
 
 ### Demonstrated behavior
 
-With the `demo` profile (`peer1` ↔ `peer2`, `PEER_ENDPOINT` set on both),
-a full round trip works: `ping 10.8.0.12` from inside `peer1` sends an
+With the `demo` profile (`peer1` ↔ `peer2`, both configured with a
+`[Peer]` section pointing at each other), a full round trip works:
+`ping 10.8.0.12` from inside `peer1` sends an
 ICMP echo through `peer1`'s TUN, across UDP to `peer2`, into `peer2`'s TUN
 — at which point the kernel on `peer2` treats it as normal inbound traffic
 to its own address and generates an ICMP echo reply, which routes back out
@@ -130,5 +131,5 @@ traffic on a point-to-point interface.
 * No handling of MTU/fragmentation overhead once packets carry
   encryption/framing overhead — revisit when the crypto milestones add
   bytes to each datagram.
-* `PEER_ENDPOINT` is a single fixed remote peer, not a routing table —
-  real multi-peer forwarding is future work (see the roadmap).
+* The `[Peer]` section holds a single fixed remote peer, not a routing
+  table — real multi-peer forwarding is future work (see the roadmap).

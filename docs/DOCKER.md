@@ -79,20 +79,35 @@ definitions. Adding a `peer6` is a small, mechanical addition (copy one
 block, bump the IP), not a structural change — this is what "naturally
 supports multiple peers" means in Docker Compose terms.
 
+## Peer configuration files
+
+Each peer service mounts a read-only config file from `configs/<peer>.conf`
+on the host to `/etc/forgevpn/forgevpn.conf` in the container:
+
+```yaml
+volumes:
+  - ./configs/peer1.conf:/etc/forgevpn/forgevpn.conf:ro
+```
+
+This replaced an earlier version of this setup that passed peer identity
+and addressing through `environment:` variables. See
+[docs/CONFIGURATION.md](CONFIGURATION.md) for the file format itself.
+
 ## Current state vs. future work
 
-At this stage `forgevpn` is a placeholder binary (see
-[`src/main.c`](../src/main.c)) that starts, logs its `PEER_NAME`, and
-exits cleanly on `SIGTERM`. It exists to prove the build → test → run
-pipeline end to end before any VPN logic exists. It does not create a TUN
-interface or open a UDP socket yet.
+`forgevpn` creates and configures its TUN interface, binds a UDP socket,
+and bridges the two with a `poll()` loop, all driven by its mounted config
+file — see [docs/NETWORKING.md](NETWORKING.md) for how packets actually
+move. There is no key material yet; that arrives with the cryptography
+milestones, at which point `configs/*.conf` and this Docker setup will
+need to account for mounting (or generating) private keys as well.
 
-As real milestones land, this document and `docker-compose.yml` should be
-updated to reflect:
+As remaining milestones land, this document and `docker-compose.yml`
+should be updated to reflect:
 
-* Config file / key material mounted per peer (likely via `volumes` and a
-  `configs/` directory once a configuration format exists).
-* Any additional `sysctls` or capabilities required once packet forwarding
-  between peers is implemented.
+* Key material mounted per peer, once the cryptography milestones exist
+  (likely alongside the existing `configs/` volume mounts).
+* Any additional `sysctls` or capabilities required once real N-way
+  routing (not just a fixed `[Peer]` endpoint) is implemented.
 * CI usage of the `test` build stage (e.g. `docker build --target test`)
   once continuous integration is introduced.
