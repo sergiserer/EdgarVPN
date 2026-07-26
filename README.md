@@ -1,5 +1,7 @@
 # ForgeVPN
 
+[![CI](https://github.com/sergiserer/ForgeVPN/actions/workflows/ci.yml/badge.svg)](https://github.com/sergiserer/ForgeVPN/actions/workflows/ci.yml)
+
 > A WireGuard-inspired VPN built from scratch in C — peer-to-peer tunneling over Linux TUN interfaces, developed and demonstrated entirely through Docker.
 
 ForgeVPN is a long-term systems programming project: implementing a modern VPN's core pieces (virtual networking, UDP transport, authenticated encryption, peer-to-peer session management) from first principles in C, rather than using an existing VPN library. It's built to be read — modular, documented, and reproducible with a single command.
@@ -96,8 +98,8 @@ What actually runs today, peer by peer:
 * [x] Session lifecycle: keepalive, automatic reconnection, sliding-window replay protection
 * [x] Multi-peer routing (`AllowedIPs`-based, per-peer sessions, 5-node full mesh demo)
 * [x] Structured logging and diagnostics (leveled + JSON-capable, per-peer statistics)
+* [x] Continuous integration (GitHub Actions runs the full `ctest` suite in Docker on every push/PR)
 * [ ] Key rotation independent of a full reconnection
-* [ ] Continuous integration
 
 ---
 

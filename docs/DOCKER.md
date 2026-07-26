@@ -93,6 +93,31 @@ This replaced an earlier version of this setup that passed peer identity
 and addressing through `environment:` variables. See
 [docs/CONFIGURATION.md](CONFIGURATION.md) for the file format itself.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request. It has a
+single job that checks out the repository and runs exactly the command
+above for the `test` profile:
+
+```bash
+docker compose --profile test up --build --abort-on-container-exit --exit-code-from test
+```
+
+This is deliberately the same command a contributor runs locally (and the
+same one `.claude/hooks/build-and-test.sh` runs automatically during
+development) — there is one definition of "the project passes," not a
+separate CI-only build that could drift from what actually gets tested
+day to day. `--exit-code-from test` makes the job fail when `ctest`
+fails, and a `docker compose --profile test down` teardown step runs
+`if: always()` so a failed run doesn't leave containers behind on the
+runner.
+
+CI does not yet run the `demo` or `multi-peer` profiles end-to-end (no
+automated check that a real handshake and ping succeed across containers)
+— today that's still validated manually in Docker, as described
+throughout this project's docs. Only the `ctest` suite (unit and
+real-kernel integration tests) is gated on CI for now.
+
 ## Current state vs. future work
 
 `forgevpn` creates and configures its TUN interface, binds a UDP socket,
@@ -109,5 +134,3 @@ should be updated to reflect:
   (likely alongside the existing `configs/` volume mounts).
 * Any additional `sysctls` or capabilities required once real N-way
   routing (not just a fixed `[Peer]` endpoint) is implemented.
-* CI usage of the `test` build stage (e.g. `docker build --target test`)
-  once continuous integration is introduced.
