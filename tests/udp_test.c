@@ -36,7 +36,7 @@ int main(void)
         return 1;
     }
 
-    const char *msg = "forgevpn-udp-test";
+    const char *msg = "edgarvpn-udp-test";
     if (udp_send(&a, msg, strlen(msg), &b_addr) < 0) {
         perror("udp_send");
         udp_close(&a);

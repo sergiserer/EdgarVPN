@@ -1,4 +1,4 @@
-# ForgeVPN development & demonstration environment.
+# EdgarVPN development & demonstration environment.
 #
 # Every peer runs in its own container on a dedicated bridge network,
 # simulating independent machines communicating over UDP. No host
@@ -22,7 +22,7 @@ x-peer-base: &peer-base
   devices:
     - /dev/net/tun:/dev/net/tun
   networks:
-    - forgevpn-net
+    - edgarvpn-net
   stdin_open: true
   tty: true
   restart: "no"
@@ -30,45 +30,45 @@ x-peer-base: &peer-base
 services:
   peer1:
     <<: *peer-base
-    container_name: forgevpn-peer1
+    container_name: edgarvpn-peer1
     hostname: peer1
     volumes:
-      - ./configs/peer1.conf:/etc/forgevpn/forgevpn.conf:ro
+      - ./configs/peer1.conf:/etc/edgarvpn/edgarvpn.conf:ro
     networks:
-      forgevpn-net:
+      edgarvpn-net:
         ipv4_address: 10.10.0.11
     profiles: ["demo", "multi-peer"]
 
   peer2:
     <<: *peer-base
-    container_name: forgevpn-peer2
+    container_name: edgarvpn-peer2
     hostname: peer2
     volumes:
-      - ./configs/peer2.conf:/etc/forgevpn/forgevpn.conf:ro
+      - ./configs/peer2.conf:/etc/edgarvpn/edgarvpn.conf:ro
     networks:
-      forgevpn-net:
+      edgarvpn-net:
         ipv4_address: 10.10.0.12
     profiles: ["demo", "multi-peer"]
 
   peer3:
     <<: *peer-base
-    container_name: forgevpn-peer3
+    container_name: edgarvpn-peer3
     hostname: peer3
     volumes:
-      - ./configs/peer3.conf:/etc/forgevpn/forgevpn.conf:ro
+      - ./configs/peer3.conf:/etc/edgarvpn/edgarvpn.conf:ro
     networks:
-      forgevpn-net:
+      edgarvpn-net:
         ipv4_address: 10.10.0.13
     profiles: ["multi-peer"]
 
   peer4:
     <<: *peer-base
-    container_name: forgevpn-peer4
+    container_name: edgarvpn-peer4
     hostname: peer4
     volumes:
-      - ./configs/peer4.conf:/etc/forgevpn/forgevpn.conf:ro
+      - ./configs/peer4.conf:/etc/edgarvpn/edgarvpn.conf:ro
     networks:
-      forgevpn-net:
+      edgarvpn-net:
         ipv4_address: 10.10.0.14
     profiles: ["multi-peer"]
 
@@ -77,12 +77,12 @@ services:
   # mode -- proof the topology still builds and starts with an odd peer out.
   peer5:
     <<: *peer-base
-    container_name: forgevpn-peer5
+    container_name: edgarvpn-peer5
     hostname: peer5
     volumes:
-      - ./configs/peer5.conf:/etc/forgevpn/forgevpn.conf:ro
+      - ./configs/peer5.conf:/etc/edgarvpn/edgarvpn.conf:ro
     networks:
-      forgevpn-net:
+      edgarvpn-net:
         ipv4_address: 10.10.0.15
     profiles: ["multi-peer"]
 
@@ -91,7 +91,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: test
-    container_name: forgevpn-test
+    container_name: edgarvpn-test
     # tun_test creates a real TUN interface, so the test container needs
     # the same capabilities as a peer -- this is an integration test, not
     # a hermetic unit test. config_test and udp_test need neither
@@ -103,7 +103,7 @@ services:
     profiles: ["test"]
 
 networks:
-  forgevpn-net:
+  edgarvpn-net:
     driver: bridge
     ipam:
       config:

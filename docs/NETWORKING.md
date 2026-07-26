@@ -1,14 +1,14 @@
 # Networking
 
-This document covers ForgeVPN's addressing scheme, the TUN interface
+This document covers EdgarVPN's addressing scheme, the TUN interface
 module, the UDP transport module, and multi-peer routing.
 
 ## Two address spaces
 
-ForgeVPN's Docker environment has two distinct networks, deliberately kept
+EdgarVPN's Docker environment has two distinct networks, deliberately kept
 separate:
 
-* **Underlay (`10.10.0.0/24`, the `forgevpn-net` Docker bridge)** — the
+* **Underlay (`10.10.0.0/24`, the `edgarvpn-net` Docker bridge)** — the
   "physical" network each peer's container is attached to. In a real
   deployment this stands in for the public internet: peers exchange
   encrypted UDP packets across it, and it has no knowledge of VPN traffic.
@@ -133,7 +133,7 @@ about where `peer1` is until `peer1` proves who it is.
 
 ## Bridging TUN and UDP (`src/main.c`)
 
-`forgevpn` runs a `poll()` loop over two file descriptors at once: the
+`edgarvpn` runs a `poll()` loop over two file descriptors at once: the
 TUN device and the UDP socket.
 
 * **TUN readable** → a packet arrived from the kernel (e.g. an
@@ -183,7 +183,7 @@ authenticate without a matching key configured) but does not forward TUN
 traffic anywhere — it just logs captured packet sizes. Not currently
 used by any peer in the demo topology (see "Full mesh" in
 `docs/CONFIGURATION.md`), but still exercised: `smoke_test.sh` runs
-`forgevpn` with no `[Peer]` section at all.
+`edgarvpn` with no `[Peer]` section at all.
 
 ### Demonstrated behavior
 

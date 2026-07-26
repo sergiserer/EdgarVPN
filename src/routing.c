@@ -24,7 +24,7 @@ int routing_matches(struct in_addr addr, struct in_addr network, unsigned int pr
     return (addr.s_addr & mask) == (network.s_addr & mask);
 }
 
-int routing_find_peer_for_dest(const forgevpn_config_t *cfg, struct in_addr dest)
+int routing_find_peer_for_dest(const edgarvpn_config_t *cfg, struct in_addr dest)
 {
     for (int i = 0; i < cfg->peer_count; i++) {
         if (routing_matches(dest, cfg->peers[i].allowed_address, cfg->peers[i].allowed_prefix)) {

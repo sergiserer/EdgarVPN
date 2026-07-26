@@ -11,7 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define CAPTURE_PATH "/tmp/forgevpn_log_test_capture.txt"
+#define CAPTURE_PATH "/tmp/edgarvpn_log_test_capture.txt"
 
 /* Redirects stdout to CAPTURE_PATH for the duration of `fn`, then
  * restores it and returns the captured content (NUL-terminated) in

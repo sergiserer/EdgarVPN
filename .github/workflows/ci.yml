@@ -19,7 +19,7 @@ jobs:
       # .claude/hooks/build-and-test.sh runs locally on every source
       # edit -- one definition of "does the project pass," not a
       # separate CI-only build.
-      - name: Build and run the ForgeVPN test suite
+      - name: Build and run the EdgarVPN test suite
         run: >
           docker compose --profile test up --build
           --abort-on-container-exit --exit-code-from test

@@ -1,6 +1,6 @@
 # Cryptography
 
-This document covers ForgeVPN's cryptographic design: the X25519 key
+This document covers EdgarVPN's cryptographic design: the X25519 key
 exchange, the live handshake that provides forward secrecy, session
 lifecycle (keepalive and reconnection), the authenticated encryption
 wrapping every tunnel packet, and what's deliberately still missing.
@@ -20,20 +20,20 @@ actually protected that traffic are gone.
 An idle established session sends periodic keepalives, and an initiator
 that stops hearing from its peer re-runs the handshake with a fresh
 ephemeral key pair -- so the tunnel recovers automatically if a peer
-restarts or the network drops packets for a while. Replay protection uses
-a sliding window, tolerating ordinary UDP reordering rather than
-rejecting anything that arrives out of sequence.
+restarts or the network drops packets for a while. The initiator also
+proactively rotates a healthy session's keys on a fixed schedule,
+independent of any reconnection -- see "Key rotation" below. Replay
+protection uses a sliding window, tolerating ordinary UDP reordering
+rather than rejecting anything that arrives out of sequence.
 
 What's still missing, deliberately deferred to later milestones (see
 `docs/ROADMAP.md`):
 
-* **No key rotation.** A given handshake's forward-secret data keys are
-  used for as long as that session stays established -- there's no
-  periodic rekey independent of a full reconnection.
-* **Fixed, non-configurable timers.** The keepalive interval and session
-  timeout (see below) are compile-time constants, tuned short for demo
-  visibility rather than production use. Making them configurable (like
-  WireGuard's `PersistentKeepalive`) is future polish.
+* **Fixed, non-configurable timers.** The keepalive interval, session
+  timeout, and key rotation interval (see below) are compile-time
+  constants, tuned short for demo visibility rather than production use.
+  Making them configurable (like WireGuard's `PersistentKeepalive`) is
+  future polish.
 * **No DoS/flood protection or identity hiding** -- see "Known
   limitations" further down.
 
@@ -47,7 +47,7 @@ the exception: implementing Curve25519 scalar multiplication or an AEAD
 cipher by hand is a well-known way to introduce subtle, exploitable bugs
 (timing side channels, incorrect constant-time comparisons, nonce
 misuse), even for experienced engineers. **Knowing when not to write your
-own crypto is itself the professional judgment call.** ForgeVPN uses
+own crypto is itself the professional judgment call.** EdgarVPN uses
 [libsodium](https://doc.libsodium.org/), a widely audited, industry
 standard library, for every cryptographic operation.
 
@@ -57,7 +57,7 @@ standard library, for every cryptographic operation.
 raw `crypto_scalarmult` (X25519) directly:
 
 * `crypto_generate_keypair` → `crypto_kx_keypair`: generates an X25519
-  key pair (used for both long-term identity keys, via `forgevpn-keygen`,
+  key pair (used for both long-term identity keys, via `edgarvpn-keygen`,
   and for the ephemeral keys `src/session.c` generates per handshake
   attempt).
 * `crypto_derive_public_key` → `crypto_scalarmult_base`: recomputes a
@@ -82,7 +82,7 @@ the exchange is already computing key material for both directions.
 Because `crypto_kx_client_session_keys` and `crypto_kx_server_session_keys`
 compute their `rx`/`tx` pair in opposite order from the same shared
 secret, both peers must agree on which one calls which -- otherwise
-peer A's `tx` won't match peer B's `rx`. ForgeVPN calls these roles
+peer A's `tx` won't match peer B's `rx`. EdgarVPN calls these roles
 **initiator** and **responder** (`crypto_role_t`), configured explicitly
 via the `Role` key in each peer's `[Peer]` section (see
 `docs/CONFIGURATION.md`). The same role also decides who sends the first
@@ -100,13 +100,13 @@ files and the output of `wg genkey`. `crypto_encode_base64` /
 base64 here either, for the same "don't hand-roll security-adjacent code"
 reasoning as above.
 
-## `forgevpn-keygen`
+## `edgarvpn-keygen`
 
 A small CLI tool (`tools/keygen.c`), bundled into the runtime image
-alongside `forgevpn`, generates one key pair and prints it:
+alongside `edgarvpn`, generates one key pair and prints it:
 
 ```bash
-docker compose run --rm peer1 forgevpn-keygen
+docker compose run --rm peer1 edgarvpn-keygen
 ```
 
 ```
@@ -234,6 +234,45 @@ deliberately shorter than WireGuard's real-world defaults (25s / no fixed
 session timeout, since WireGuard's design differs here) so the behavior
 is easy to observe in a short demo run; see "Current state" above.
 
+## Key rotation
+
+A session that never needs to reconnect -- a peer that stays up and
+responsive indefinitely -- would otherwise use the same forward-secret
+data keys forever, growing the amount of traffic protected by a single
+key without bound. To close that gap, the **initiator** (only) tracks how
+long it's been since its current session last completed a handshake
+(`last_handshake_completed_ms` in `src/main.c`), and proactively starts a
+fresh one -- `session_start_handshake` plus a new `HANDSHAKE_INIT`, the
+exact same mechanism reconnection uses -- once that exceeds
+`KEY_ROTATION_INTERVAL_MS` (45s; real WireGuard's `REKEY_AFTER_TIME` is
+120s, shortened here for demo visibility), regardless of whether the
+session is otherwise perfectly healthy.
+
+This is a deliberately different trigger from reconnection, not just a
+second copy of it: reconnection is *reactive*, firing only after
+`SESSION_TIMEOUT_MS` of silence from a peer that might be dead.
+Rotation is *proactive*, firing against a peer already known to be
+responsive -- so the new handshake normally completes in a single
+round-trip (milliseconds, in the demo), not several 15-second retries.
+No protocol or wire-format change was needed: rotation is purely an
+orchestration decision in `src/main.c` about *when* to call the same
+handshake functions `session.c` already exposed for reconnection.
+
+**Known gap, stated plainly rather than glossed over**: `session_t` holds
+exactly one set of data keys at a time, so while the new handshake is
+`HANDSHAKE_PENDING`, outbound traffic is dropped just as it is during a
+reactive reconnection (`src/main.c`'s existing
+`state != SESSION_STATE_ESTABLISHED` check) -- there is a brief gap,
+bounded to roughly one round-trip against a live peer, not a seamless,
+zero-downtime rekey. Real WireGuard avoids any gap at all by keeping the
+old and new sessions both live for an overlap period, distinguished by a
+4-byte receiver index carried in every transport message, so the sender
+can switch over the moment the new handshake completes while the
+receiver still accepts the old session's traffic in the meantime.
+EdgarVPN has no such session-index concept -- `session_t` is one session
+per configured peer, not several concurrent ones -- and adding one would
+be a materially larger architectural change than this milestone's scope.
+
 ## Wire framing
 
 Every UDP datagram starts with a one-byte, unencrypted message type, so
@@ -266,8 +305,10 @@ that, in cleartext, purely as protocol framing.
 * **No identity hiding.** The handshake reveals which static key pairs
   are talking to an observer who can see the traffic pattern, even
   though the ephemeral keys themselves are protected.
-* **No key rotation independent of reconnection.** A long-lived, never-
-  interrupted session keeps using the same data keys indefinitely.
+* **Key rotation isn't seamless.** Rotation (see "Key rotation" above)
+  bounds key lifetime, but still causes a brief outbound-traffic gap
+  during the swap -- there's no dual-session overlap like real
+  WireGuard's receiver-index mechanism.
 
 ## Authenticated encryption: packet format
 
@@ -313,7 +354,7 @@ verified. Both `session_open_data` (data, sliding window) and
 `SESSION_REPLAY_WINDOW_BITS` (1024) of the highest one seen, tracked with
 a bitmap (`session_t.replay_window`) indexed by `counter %
 SESSION_REPLAY_WINDOW_BITS` -- the standard sliding-window anti-replay
-algorithm (the same idea IPsec and WireGuard use, though ForgeVPN's
+algorithm (the same idea IPsec and WireGuard use, though EdgarVPN's
 window size is its own choice, not matched to either):
 
 * A counter **ahead of** the current highest slides the window forward,

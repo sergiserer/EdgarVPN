@@ -117,7 +117,7 @@ static int test_matches_subnet(void)
 
 static int test_find_peer_for_dest(void)
 {
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.peer_count = 3;
     cfg.peers[0].allowed_address = addr("10.8.0.12");

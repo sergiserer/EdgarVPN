@@ -1,6 +1,6 @@
 # Logging & Diagnostics
 
-This document covers ForgeVPN's logging module (`include/log.h`,
+This document covers EdgarVPN's logging module (`include/log.h`,
 `src/log.c`) and the basic per-peer statistics built on top of it.
 
 ## Why a logging module, not `printf`

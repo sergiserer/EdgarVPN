@@ -1,6 +1,6 @@
 /*
- * forgevpn-keygen: generates an X25519 key pair and prints both keys as
- * base64 -- the format ForgeVPN config files expect: PrivateKey under
+ * edgarvpn-keygen: generates an X25519 key pair and prints both keys as
+ * base64 -- the format EdgarVPN config files expect: PrivateKey under
  * [Interface] on this peer's own file, PublicKey under [Peer] on the
  * *other* peer's file. Mirrors WireGuard's `wg genkey` / `wg pubkey`
  * as a single tool. See docs/CRYPTOGRAPHY.md.
@@ -13,7 +13,7 @@
 int main(void)
 {
     if (crypto_init() != 0) {
-        fprintf(stderr, "forgevpn-keygen: failed to initialize crypto library\n");
+        fprintf(stderr, "edgarvpn-keygen: failed to initialize crypto library\n");
         return 1;
     }
 

@@ -1,5 +1,5 @@
-#ifndef FORGEVPN_LOG_H
-#define FORGEVPN_LOG_H
+#ifndef EDGARVPN_LOG_H
+#define EDGARVPN_LOG_H
 
 /*
  * Structured, leveled logging. Replaces the ad hoc printf/fprintf calls
@@ -32,15 +32,15 @@ void log_init(void);
 int log_level_enabled(log_level_t level);
 
 #if defined(__GNUC__)
-#define FORGEVPN_PRINTF_FMT(fmt_idx, args_idx) \
+#define EDGARVPN_PRINTF_FMT(fmt_idx, args_idx) \
     __attribute__((format(printf, fmt_idx, args_idx)))
 #else
-#define FORGEVPN_PRINTF_FMT(fmt_idx, args_idx)
+#define EDGARVPN_PRINTF_FMT(fmt_idx, args_idx)
 #endif
 
-void log_debug(const char *component, const char *fmt, ...) FORGEVPN_PRINTF_FMT(2, 3);
-void log_info(const char *component, const char *fmt, ...) FORGEVPN_PRINTF_FMT(2, 3);
-void log_warn(const char *component, const char *fmt, ...) FORGEVPN_PRINTF_FMT(2, 3);
-void log_error(const char *component, const char *fmt, ...) FORGEVPN_PRINTF_FMT(2, 3);
+void log_debug(const char *component, const char *fmt, ...) EDGARVPN_PRINTF_FMT(2, 3);
+void log_info(const char *component, const char *fmt, ...) EDGARVPN_PRINTF_FMT(2, 3);
+void log_warn(const char *component, const char *fmt, ...) EDGARVPN_PRINTF_FMT(2, 3);
+void log_error(const char *component, const char *fmt, ...) EDGARVPN_PRINTF_FMT(2, 3);
 
-#endif /* FORGEVPN_LOG_H */
+#endif /* EDGARVPN_LOG_H */

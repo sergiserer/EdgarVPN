@@ -10,7 +10,7 @@
 #include <strings.h>
 
 #define CONFIG_DEFAULT_PORT 51820
-#define CONFIG_DEFAULT_DEVICE "forge0"
+#define CONFIG_DEFAULT_DEVICE "edgar0"
 #define CONFIG_MAX_LINE 512
 
 typedef enum {
@@ -137,7 +137,7 @@ static int parse_endpoint_value(const char *value, char *host_out, size_t host_l
     return 0;
 }
 
-int config_load(const char *path, forgevpn_config_t *cfg)
+int config_load(const char *path, edgarvpn_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     strcpy(cfg->name, "unnamed-peer");

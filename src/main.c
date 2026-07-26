@@ -1,5 +1,5 @@
 /*
- * Entry point for the ForgeVPN peer daemon.
+ * Entry point for the EdgarVPN peer daemon.
  *
  * A peer can now have any number of [Peer] sections (see
  * docs/CONFIGURATION.md), each with its own live handshake (src/session.c),
@@ -49,7 +49,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEFAULT_CONFIG_PATH "/etc/forgevpn/forgevpn.conf"
+#define DEFAULT_CONFIG_PATH "/etc/edgarvpn/edgarvpn.conf"
 #define MAX_PACKET_SIZE 2048
 #define SEALED_BUF_SIZE (SESSION_DATA_OVERHEAD + MAX_PACKET_SIZE)
 
@@ -65,6 +65,14 @@
  * re-handshake (which includes retrying DNS resolution) if we haven't
  * received anything valid from it in this long. */
 #define SESSION_TIMEOUT_MS 15000
+/* For a peer we're the initiator toward: proactively re-handshake an
+ * already-established session after this long, bounding how long any one
+ * set of data keys stays in use, independent of whether the peer is
+ * actually still responsive. Deliberately much larger than
+ * SESSION_TIMEOUT_MS so a healthy session always rotates on its own
+ * schedule rather than racing the dead-peer timeout; real WireGuard's
+ * REKEY_AFTER_TIME is 120s, this is tuned shorter for demo visibility. */
+#define KEY_ROTATION_INTERVAL_MS 45000
 /* How often to log each peer's traffic/handshake/error counters. */
 #define STATS_INTERVAL_MS 30000
 
@@ -81,6 +89,7 @@ typedef struct {
     session_t session;
     uint64_t last_rx_activity_ms;
     uint64_t last_tx_activity_ms;
+    uint64_t last_handshake_completed_ms;
 
     uint64_t stat_packets_tx;
     uint64_t stat_bytes_tx;
@@ -217,7 +226,7 @@ int main(void)
     sigaction(SIGTERM, &sa, NULL);
 
     if (crypto_init() != 0) {
-        log_error("forgevpn", "failed to initialize crypto library");
+        log_error("edgarvpn", "failed to initialize crypto library");
         return 1;
     }
 
@@ -226,7 +235,7 @@ int main(void)
         config_path = DEFAULT_CONFIG_PATH;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(config_path, &cfg) != 0) {
         return 1;
     }
@@ -385,6 +394,7 @@ int main(void)
                         matched->addr_resolved = 1;
                         matched->last_rx_activity_ms = monotonic_ms();
                         matched->last_tx_activity_ms = matched->last_rx_activity_ms;
+                        matched->last_handshake_completed_ms = matched->last_rx_activity_ms;
                         matched->stat_handshakes++;
                         char from_ip[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
@@ -415,6 +425,7 @@ int main(void)
                     } else {
                         ps->last_rx_activity_ms = monotonic_ms();
                         ps->last_tx_activity_ms = ps->last_rx_activity_ms;
+                        ps->last_handshake_completed_ms = ps->last_rx_activity_ms;
                         ps->stat_handshakes++;
                         log_info(cfg.name, "handshake complete with '%s', session established",
                                    ps->config->host);
@@ -427,6 +438,7 @@ int main(void)
                         ps->stat_auth_failures++;
                     } else {
                         ps->last_rx_activity_ms = monotonic_ms();
+                        ps->last_handshake_completed_ms = ps->last_rx_activity_ms;
                         ps->stat_handshakes++;
                         log_info(cfg.name, "handshake complete with '%s', session established",
                                    ps->config->host);
@@ -491,6 +503,18 @@ int main(void)
                         log_warn(cfg.name, "heard nothing from '%s' in %ums, re-handshaking",
                                    ps->config->host, (unsigned)(now - ps->last_rx_activity_ms));
                     }
+                    initiate_handshake(ps, cfg.name, &udp, cipher_buf, sizeof(cipher_buf), now);
+                } else if (ps->config->role == CRYPTO_ROLE_INITIATOR &&
+                           ps->session.state == SESSION_STATE_ESTABLISHED &&
+                           now - ps->last_handshake_completed_ms >= KEY_ROTATION_INTERVAL_MS) {
+                    /* Proactive rekey of a healthy session -- not a
+                     * dead-peer recovery. Reuses the same handshake as
+                     * reconnection, but triggered by key age rather than
+                     * peer silence, against a peer we already know is
+                     * responsive, so it normally completes in one
+                     * round-trip instead of racing SESSION_TIMEOUT_MS. */
+                    log_info(cfg.name, "rotating session keys with '%s' after %ums",
+                               ps->config->host, (unsigned)(now - ps->last_handshake_completed_ms));
                     initiate_handshake(ps, cfg.name, &udp, cipher_buf, sizeof(cipher_buf), now);
                 }
             }

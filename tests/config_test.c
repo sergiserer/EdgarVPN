@@ -33,7 +33,7 @@ static void generate_key_text(char out[CRYPTO_KEY_TEXT_LEN])
 
 static int test_valid_config(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_valid.conf";
+    const char *path = "/tmp/edgarvpn_config_test_valid.conf";
 
     char private_key[CRYPTO_KEY_TEXT_LEN];
     char public_key[CRYPTO_KEY_TEXT_LEN];
@@ -62,7 +62,7 @@ static int test_valid_config(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) != 0) {
         fprintf(stderr, "test_valid_config: config_load failed unexpectedly\n");
         return 1;
@@ -102,7 +102,7 @@ static int test_valid_config(void)
 
 static int test_multiple_peers_parsed(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_multi.conf";
+    const char *path = "/tmp/edgarvpn_config_test_multi.conf";
 
     char private_key[CRYPTO_KEY_TEXT_LEN];
     char pub_a[CRYPTO_KEY_TEXT_LEN];
@@ -143,7 +143,7 @@ static int test_multiple_peers_parsed(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) != 0) {
         fprintf(stderr, "test_multiple_peers_parsed: config_load failed unexpectedly\n");
         return 1;
@@ -172,7 +172,7 @@ static int test_multiple_peers_parsed(void)
 
 static int test_too_many_peers_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_too_many.conf";
+    const char *path = "/tmp/edgarvpn_config_test_too_many.conf";
 
     char private_key[CRYPTO_KEY_TEXT_LEN];
     generate_key_text(private_key);
@@ -201,7 +201,7 @@ static int test_too_many_peers_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr, "test_too_many_peers_rejected: config_load unexpectedly succeeded\n");
         return 1;
@@ -213,7 +213,7 @@ static int test_too_many_peers_rejected(void)
 
 static int test_capture_only_config(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_captureonly.conf";
+    const char *path = "/tmp/edgarvpn_config_test_captureonly.conf";
     const char *contents =
         "[Interface]\n"
         "Address = 10.8.0.15/24\n";
@@ -223,7 +223,7 @@ static int test_capture_only_config(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) != 0) {
         fprintf(stderr, "test_capture_only_config: config_load failed unexpectedly\n");
         return 1;
@@ -237,8 +237,8 @@ static int test_capture_only_config(void)
         fprintf(stderr, "test_capture_only_config: expected has_private_key to be false\n");
         return 1;
     }
-    if (strcmp(cfg.tun_name, "forge0") != 0) {
-        fprintf(stderr, "test_capture_only_config: expected default DeviceName 'forge0'\n");
+    if (strcmp(cfg.tun_name, "edgar0") != 0) {
+        fprintf(stderr, "test_capture_only_config: expected default DeviceName 'edgar0'\n");
         return 1;
     }
     if (cfg.listen_port != 51820) {
@@ -252,7 +252,7 @@ static int test_capture_only_config(void)
 
 static int test_missing_address_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_invalid.conf";
+    const char *path = "/tmp/edgarvpn_config_test_invalid.conf";
     const char *contents =
         "[Interface]\n"
         "Name = peer1\n";
@@ -262,7 +262,7 @@ static int test_missing_address_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr, "test_missing_address_rejected: config_load unexpectedly succeeded\n");
         return 1;
@@ -274,7 +274,7 @@ static int test_missing_address_rejected(void)
 
 static int test_peer_without_private_key_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_no_private_key.conf";
+    const char *path = "/tmp/edgarvpn_config_test_no_private_key.conf";
 
     char public_key[CRYPTO_KEY_TEXT_LEN];
     generate_key_text(public_key);
@@ -296,7 +296,7 @@ static int test_peer_without_private_key_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr,
                 "test_peer_without_private_key_rejected: config_load unexpectedly succeeded\n");
@@ -309,7 +309,7 @@ static int test_peer_without_private_key_rejected(void)
 
 static int test_peer_without_public_key_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_no_public_key.conf";
+    const char *path = "/tmp/edgarvpn_config_test_no_public_key.conf";
 
     char private_key[CRYPTO_KEY_TEXT_LEN];
     generate_key_text(private_key);
@@ -331,7 +331,7 @@ static int test_peer_without_public_key_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr,
                 "test_peer_without_public_key_rejected: config_load unexpectedly succeeded\n");
@@ -344,7 +344,7 @@ static int test_peer_without_public_key_rejected(void)
 
 static int test_peer_without_role_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_no_role.conf";
+    const char *path = "/tmp/edgarvpn_config_test_no_role.conf";
 
     char private_key[CRYPTO_KEY_TEXT_LEN];
     char public_key[CRYPTO_KEY_TEXT_LEN];
@@ -368,7 +368,7 @@ static int test_peer_without_role_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr, "test_peer_without_role_rejected: config_load unexpectedly succeeded\n");
         return 1;
@@ -380,7 +380,7 @@ static int test_peer_without_role_rejected(void)
 
 static int test_peer_without_allowed_ips_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_no_allowed_ips.conf";
+    const char *path = "/tmp/edgarvpn_config_test_no_allowed_ips.conf";
 
     char private_key[CRYPTO_KEY_TEXT_LEN];
     char public_key[CRYPTO_KEY_TEXT_LEN];
@@ -404,7 +404,7 @@ static int test_peer_without_allowed_ips_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr,
                 "test_peer_without_allowed_ips_rejected: config_load unexpectedly succeeded\n");
@@ -417,7 +417,7 @@ static int test_peer_without_allowed_ips_rejected(void)
 
 static int test_malformed_key_rejected(void)
 {
-    const char *path = "/tmp/forgevpn_config_test_bad_key.conf";
+    const char *path = "/tmp/edgarvpn_config_test_bad_key.conf";
     const char *contents =
         "[Interface]\n"
         "Address = 10.8.0.11/24\n"
@@ -428,7 +428,7 @@ static int test_malformed_key_rejected(void)
         return 1;
     }
 
-    forgevpn_config_t cfg;
+    edgarvpn_config_t cfg;
     if (config_load(path, &cfg) == 0) {
         fprintf(stderr, "test_malformed_key_rejected: config_load unexpectedly succeeded\n");
         return 1;

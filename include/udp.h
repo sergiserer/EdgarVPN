@@ -1,12 +1,12 @@
-#ifndef FORGEVPN_UDP_H
-#define FORGEVPN_UDP_H
+#ifndef EDGARVPN_UDP_H
+#define EDGARVPN_UDP_H
 
 #include <netinet/in.h>
 #include <stddef.h>
 #include <sys/types.h>
 
 /*
- * A UDP socket used as ForgeVPN's transport: peers exchange datagrams
+ * A UDP socket used as EdgarVPN's transport: peers exchange datagrams
  * carrying raw IP packets (today) and, once the cryptography milestones
  * land, encrypted/authenticated packets instead.
  */
@@ -46,4 +46,4 @@ ssize_t udp_recv(const udp_socket_t *sock, void *buf, size_t buf_len,
  * failed to open (leaves sock->fd untouched at its closed sentinel, -1). */
 void udp_close(udp_socket_t *sock);
 
-#endif /* FORGEVPN_UDP_H */
+#endif /* EDGARVPN_UDP_H */

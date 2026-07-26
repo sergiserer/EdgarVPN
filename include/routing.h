@@ -1,5 +1,5 @@
-#ifndef FORGEVPN_ROUTING_H
-#define FORGEVPN_ROUTING_H
+#ifndef EDGARVPN_ROUTING_H
+#define EDGARVPN_ROUTING_H
 
 #include "config.h"
 
@@ -27,6 +27,6 @@ int routing_matches(struct in_addr addr, struct in_addr network, unsigned int pr
  * Returns the peer's index, or -1 if no configured peer covers `dest`
  * (the routing-table equivalent of "no route to host").
  */
-int routing_find_peer_for_dest(const forgevpn_config_t *cfg, struct in_addr dest);
+int routing_find_peer_for_dest(const edgarvpn_config_t *cfg, struct in_addr dest);
 
-#endif /* FORGEVPN_ROUTING_H */
+#endif /* EDGARVPN_ROUTING_H */

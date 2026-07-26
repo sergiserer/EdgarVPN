@@ -38,8 +38,8 @@ CMD ["ctest", "--test-dir", "build", "--output-on-failure"]
 # Stage: runtime
 # Minimal image that actually runs as a VPN peer. Includes iproute2 for
 # inspecting/managing the TUN interface and routing table inside the
-# container, and libsodium23 -- the shared library forgevpn and
-# forgevpn-keygen are dynamically linked against for X25519 key exchange
+# container, and libsodium23 -- the shared library edgarvpn and
+# edgarvpn-keygen are dynamically linked against for X25519 key exchange
 # (see docs/CRYPTOGRAPHY.md).
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -50,10 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsodium23 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/build/forgevpn /usr/local/bin/forgevpn
-COPY --from=builder /src/build/forgevpn-keygen /usr/local/bin/forgevpn-keygen
+COPY --from=builder /src/build/edgarvpn /usr/local/bin/edgarvpn
+COPY --from=builder /src/build/edgarvpn-keygen /usr/local/bin/edgarvpn-keygen
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["forgevpn"]
+CMD ["edgarvpn"]

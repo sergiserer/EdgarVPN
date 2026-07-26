@@ -1,5 +1,5 @@
-#ifndef FORGEVPN_TUN_H
-#define FORGEVPN_TUN_H
+#ifndef EDGARVPN_TUN_H
+#define EDGARVPN_TUN_H
 
 #include <linux/if.h>
 #include <sys/types.h>
@@ -7,7 +7,7 @@
 /*
  * A Linux TUN device: a virtual, point-to-point network interface that
  * delivers raw IP packets to and from user space. This is the boundary
- * between the host's IP stack and ForgeVPN's own packet handling --
+ * between the host's IP stack and EdgarVPN's own packet handling --
  * traffic routed to a peer's virtual address arrives here before it is
  * encrypted and sent over UDP (see the transport module, once it exists).
  */
@@ -18,7 +18,7 @@ typedef struct {
 
 /*
  * Opens /dev/net/tun and creates a TUN (layer 3, no packet info) device.
- * `name_hint` requests a specific interface name (e.g. "forge0"); pass
+ * `name_hint` requests a specific interface name (e.g. "edgar0"); pass
  * NULL or an empty string to let the kernel assign the next free tunN.
  * On success, dev->name holds the name the kernel actually assigned.
  * Requires CAP_NET_ADMIN. Returns 0 on success, -1 on failure (errno set).
@@ -51,4 +51,4 @@ ssize_t tun_write(const tun_device_t *dev, const void *buf, size_t buf_len);
  */
 void tun_close(tun_device_t *dev);
 
-#endif /* FORGEVPN_TUN_H */
+#endif /* EDGARVPN_TUN_H */

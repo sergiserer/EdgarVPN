@@ -1,5 +1,5 @@
-#ifndef FORGEVPN_CONFIG_H
-#define FORGEVPN_CONFIG_H
+#ifndef EDGARVPN_CONFIG_H
+#define EDGARVPN_CONFIG_H
 
 #include "crypto.h"
 
@@ -33,7 +33,7 @@ typedef struct {
 } config_peer_t;
 
 /*
- * Parsed contents of a ForgeVPN peer configuration file. See
+ * Parsed contents of a EdgarVPN peer configuration file. See
  * docs/CONFIGURATION.md for the file format ([Interface]/[Peer]
  * sections, WireGuard-style key names).
  *
@@ -52,7 +52,7 @@ typedef struct {
 
     int peer_count;                     /* 0 if the file has no [Peer] sections */
     config_peer_t peers[CONFIG_MAX_PEERS];
-} forgevpn_config_t;
+} edgarvpn_config_t;
 
 /*
  * Loads and parses the configuration file at `path`, filling `cfg`.
@@ -67,6 +67,6 @@ typedef struct {
  * one [Peer] section is present -- there is no way to derive session
  * keys without them.
  */
-int config_load(const char *path, forgevpn_config_t *cfg);
+int config_load(const char *path, edgarvpn_config_t *cfg);
 
-#endif /* FORGEVPN_CONFIG_H */
+#endif /* EDGARVPN_CONFIG_H */

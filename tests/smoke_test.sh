@@ -1,16 +1,16 @@
 #!/bin/sh
 # Smoke test invoked by ctest (see CMakeLists.txt).
 #
-# Verifies that the forgevpn binary starts (including opening and
+# Verifies that the edgarvpn binary starts (including opening and
 # configuring its TUN device -- requires CAP_NET_ADMIN and /dev/net/tun,
 # granted to the `test` Compose service) and terminates cleanly on
 # SIGTERM.
 
 set -eu
 
-BIN="${1:?usage: smoke_test.sh <path-to-forgevpn-binary>}"
+BIN="${1:?usage: smoke_test.sh <path-to-edgarvpn-binary>}"
 
-CONFIG_PATH="/tmp/forgevpn_smoke_test.conf"
+CONFIG_PATH="/tmp/edgarvpn_smoke_test.conf"
 cat > "$CONFIG_PATH" <<'EOF'
 [Interface]
 Name = smoke-test-peer

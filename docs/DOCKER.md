@@ -1,6 +1,6 @@
 # Docker Infrastructure
 
-This document explains the design of ForgeVPN's Docker environment: why it
+This document explains the design of EdgarVPN's Docker environment: why it
 looks the way it does, and how it is expected to evolve alongside the VPN
 implementation.
 
@@ -19,7 +19,7 @@ implementation.
 `docker/Dockerfile` has three stages:
 
 1. **`builder`** — `debian:bookworm-slim` with `build-essential` and `cmake`.
-   Compiles `forgevpn` via CMake. Nothing from this stage ships in the
+   Compiles `edgarvpn` via CMake. Nothing from this stage ships in the
    final image.
 2. **`test`** — extends `builder` and simply runs `ctest`. Selected with
    `docker compose --profile test up`. Because it reuses the builder's
@@ -40,7 +40,7 @@ development/demo environment.
 ## Networking model
 
 All peers attach to a single user-defined bridge network,
-`forgevpn-net` (`10.10.0.0/24`), with static IP addresses assigned per
+`edgarvpn-net` (`10.10.0.0/24`), with static IP addresses assigned per
 peer. This mirrors the target architecture: peers are independent hosts
 that happen to share a network path (in real life, the public internet;
 here, a Docker bridge), and they establish sessions directly with each
@@ -55,7 +55,7 @@ Each peer container is launched with:
   `--privileged`.
 
 Static IPs make peer configuration files deterministic and reproducible
-(peer2 is always reachable at `10.10.0.12` within the `forgevpn-net`
+(peer2 is always reachable at `10.10.0.12` within the `edgarvpn-net`
 network), which matters once peers need to reference each other's
 endpoints in their config.
 
@@ -82,11 +82,11 @@ supports multiple peers" means in Docker Compose terms.
 ## Peer configuration files
 
 Each peer service mounts a read-only config file from `configs/<peer>.conf`
-on the host to `/etc/forgevpn/forgevpn.conf` in the container:
+on the host to `/etc/edgarvpn/edgarvpn.conf` in the container:
 
 ```yaml
 volumes:
-  - ./configs/peer1.conf:/etc/forgevpn/forgevpn.conf:ro
+  - ./configs/peer1.conf:/etc/edgarvpn/edgarvpn.conf:ro
 ```
 
 This replaced an earlier version of this setup that passed peer identity
@@ -120,7 +120,7 @@ real-kernel integration tests) is gated on CI for now.
 
 ## Current state vs. future work
 
-`forgevpn` creates and configures its TUN interface, binds a UDP socket,
+`edgarvpn` creates and configures its TUN interface, binds a UDP socket,
 and bridges the two with a `poll()` loop, all driven by its mounted config
 file — see [docs/NETWORKING.md](NETWORKING.md) for how packets actually
 move. There is no key material yet; that arrives with the cryptography

@@ -1,5 +1,5 @@
-#ifndef FORGEVPN_CRYPTO_H
-#define FORGEVPN_CRYPTO_H
+#ifndef EDGARVPN_CRYPTO_H
+#define EDGARVPN_CRYPTO_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -136,4 +136,4 @@ ssize_t crypto_open(const unsigned char key[CRYPTO_SESSION_KEY_BYTES],
  */
 void crypto_wipe(void *buf, size_t len);
 
-#endif /* FORGEVPN_CRYPTO_H */
+#endif /* EDGARVPN_CRYPTO_H */

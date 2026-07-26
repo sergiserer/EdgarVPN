@@ -1,5 +1,5 @@
-#ifndef FORGEVPN_SESSION_H
-#define FORGEVPN_SESSION_H
+#ifndef EDGARVPN_SESSION_H
+#define EDGARVPN_SESSION_H
 
 #include "crypto.h"
 
@@ -185,4 +185,4 @@ ssize_t session_seal_data(session_t *s, const unsigned char *plaintext, size_t p
 ssize_t session_open_data(session_t *s, const unsigned char *in, size_t in_len,
                            unsigned char *out, size_t out_len);
 
-#endif /* FORGEVPN_SESSION_H */
+#endif /* EDGARVPN_SESSION_H */
