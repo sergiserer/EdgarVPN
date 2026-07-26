@@ -84,22 +84,7 @@ What actually runs today, peer by peer:
 
 ---
 
-## Roadmap
 
-* [x] Docker infrastructure & build pipeline (multi-stage image, Compose profiles, CI-ready test target)
-* [x] TUN interface module (create, configure, capture)
-* [x] UDP transport between peers (`poll()`-based bridge, real ping round-trip in the demo profile)
-* [x] Configuration file format (`[Interface]`/`[Peer]` INI-style, mounted per peer via Compose volumes)
-* [x] X25519 key exchange (libsodium `crypto_kx`, keys from per-peer config)
-* [x] ChaCha20-Poly1305 authenticated encryption + strict-monotonic replay check
-* [x] Live handshake with ephemeral keys for forward secrecy (2-message, over UDP)
-* [x] Session lifecycle: keepalive, automatic reconnection, sliding-window replay protection
-* [x] Multi-peer routing (`AllowedIPs`-based, per-peer sessions, 5-node full mesh demo)
-* [x] Structured logging and diagnostics (leveled + JSON-capable, per-peer statistics)
-* [x] Continuous integration (GitHub Actions runs the full `ctest` suite in Docker on every push/PR)
-* [x] Key rotation independent of a full reconnection (proactive, time-triggered, initiator-driven)
-
----
 
 ## Engineering philosophy
 
